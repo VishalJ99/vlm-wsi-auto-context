@@ -7,7 +7,7 @@ Canonical reviewer entrypoints:
 
 ## Batch Workflow
 
-1. Run foreground pipeline first.
+1. Run foreground method first.
 2. Point reviewer batch to baseline outputs.
 3. Review `results.csv` / `results.jsonl` and apply your rerun policy.
 

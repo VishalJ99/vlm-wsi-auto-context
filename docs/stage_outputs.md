@@ -108,7 +108,7 @@ Key files:
 ## Stage 7
 Script: `postprocess_mask.py`
 
-Pipeline-integrated outputs are written under the run directory, typically:
+Method-integrated outputs are written under the run directory, typically:
 
 ```text
 {run_dir}/stage7/

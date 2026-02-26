@@ -23,7 +23,7 @@ bash scripts/run_paper_reviewer.sh [optional_args_file]
 ## Orchestrator
 
 ### `run_foreground_pipeline.py`
-Stage 1-7 foreground pipeline orchestrator.
+Stage 1-7 foreground method orchestrator.
 
 ```bash
 python run_foreground_pipeline.py --wsi /path/to/slide.svs [options]
@@ -54,7 +54,7 @@ Single-item reviewer primitive (crop + mask + optional overlay).
 python vlm_reviewer.py --crop <png> --mask <png> [options]
 ```
 
-## Stage Scripts (Pipeline-Addressable)
+## Stage Scripts (Method-Addressable)
 
 ### Stage 1
 - `detect_foreground_regions_from_wsi_thumbnail.py`
@@ -82,7 +82,7 @@ python vlm_reviewer.py --crop <png> --mask <png> [options]
 ## Supporting Utility
 
 ### `materialize_stage1_from_xml.py`
-Converts XML-derived detections into Stage 1-compatible outputs for downstream pipeline use.
+Converts XML-derived detections into Stage 1-compatible outputs for downstream method use.
 
 ## Credential Notes
 

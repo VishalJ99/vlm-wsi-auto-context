@@ -1,6 +1,6 @@
-# Foreground Pipeline
+# Foreground Method
 
-This repository uses a staged pipeline for foreground tissue segmentation in whole slide images.
+This repository uses a staged method for foreground tissue segmentation in whole slide images.
 
 Canonical orchestrator: `run_foreground_pipeline.py`
 

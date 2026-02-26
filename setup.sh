@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WSI Foreground Pipeline - Environment Setup
+# WSI Foreground Method - Environment Setup
 # Usage: bash setup.sh
 set -euo pipefail
 
@@ -93,7 +93,7 @@ confirm_home_cache_usage() {
 }
 
 echo "============================================"
-echo "WSI Foreground Pipeline - Environment Setup"
+echo "WSI Foreground Method - Environment Setup"
 echo "============================================"
 echo ""
 

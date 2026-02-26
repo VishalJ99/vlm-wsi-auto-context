@@ -5,15 +5,15 @@ This repository contains a minimal codebase for:
 1. Foreground tissue segmentation in whole slide images (WSI)
 2. Reviewer-based quality control over Stage 3 segmentation outputs
 
-## Pipeline Figure (Figure 1)
+## Method Figure (Figure 1)
 
-![Figure 1 pipeline](docs/figures/figure1_pipeline/figure1_rendered_from_paper.png)
+![Figure 1 method](docs/figures/figure1_pipeline/figure1_rendered_from_paper.png)
 
 Rendered Figure 1 is extracted directly from the paper PDF. Raw panel assets are available in `docs/figures/figure1_pipeline/`.
 
 ## Canonical Entry Points
 
-- Foreground pipeline: `run_foreground_pipeline.py`
+- Foreground method: `run_foreground_pipeline.py`
 - Reviewer batch runner: `run_vlm_reviewer_batch.py`
 
 For reproducible runs, use the wrapper scripts:
@@ -48,7 +48,7 @@ bash scripts/run_paper_reviewer.sh
 Direct reviewer CLI examples:
 
 ```bash
-# Batch reviewer over pipeline outputs
+# Batch reviewer over method outputs
 python run_vlm_reviewer_batch.py \
   --baseline-dir runs/foreground \
   --output-root runs/reviewer \
@@ -72,7 +72,7 @@ python vlm_reviewer.py \
 
 ## Accuracy Recommendations
 
-- If you plan to run reviewer QC on pipeline overlays, enable `--stage2-force-read-l0` in foreground runs.
+- If you plan to run reviewer QC on method overlays, enable `--stage2-force-read-l0` in foreground runs.
 - This is especially important when using auto-context (`--stage6-icl-k > 0`) so downstream overlays and point grounding are done over higher-resolution bbox crops instead of thumbnail-derived crops.
 - Stage 1 grounding quality note: Qwen grounding is generally weaker than Gemini models for bbox detection coverage.
 - Stage 1 price/performance recommendation: `google/gemini-3-flash-preview` is typically the strongest cost-quality choice.
@@ -103,7 +103,7 @@ python run_foreground_pipeline.py \
 
 ## Main Output Roots
 
-- Foreground pipeline: under your chosen output root (for example `runs/foreground/`)
+- Foreground method: under your chosen output root (for example `runs/foreground/`)
 - Reviewer batch: under your chosen output root (for example `runs/reviewer/`)
 
 See `docs/stage_outputs.md` for stage-level output contracts.
@@ -112,6 +112,6 @@ See `docs/stage_outputs.md` for stage-level output contracts.
 
 - `docs/installation.md`: conda + requirements setup
 - `docs/scripts.md`: CLI map for kept scripts
-- `docs/foreground_pipeline.md`: stage-by-stage logic
+- `docs/foreground_pipeline.md`: stage-by-stage method logic
 - `docs/reviewer.md`: reviewer inputs/outputs and JSON schema
 - `docs/stage_outputs.md`: output directory/file semantics
