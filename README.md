@@ -7,9 +7,9 @@ This repository contains a minimal codebase for:
 
 ## Pipeline Figure (Figure 1)
 
-![Figure 1 pipeline panels](docs/figures/figure1_pipeline/figure1_pipeline_montage.png)
+![Figure 1 pipeline](docs/figures/figure1_pipeline/figure1_rendered_from_paper.png)
 
-Raw Figure 1 panel assets are available in `docs/figures/figure1_pipeline/`.
+Rendered Figure 1 is extracted directly from the paper PDF. Raw panel assets are available in `docs/figures/figure1_pipeline/`.
 
 ## Canonical Entry Points
 
