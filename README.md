@@ -11,12 +11,13 @@ This repository contains a minimal codebase for:
 
 ## Canonical Entry Points
 
-- Foreground method: `run_foreground_pipeline.py`
+- Foreground method: `run_foreground_method.py`
+- Auto-context alias: `run_auto_context_method.py`
 - Reviewer batch runner: `run_vlm_reviewer_batch.py`
 
 For reproducible runs, use the wrapper scripts:
 
-- `bash scripts/run_paper_foreground.sh`
+- `bash scripts/run_paper_method.sh`
 - `bash scripts/run_paper_reviewer.sh`
 
 ## Quickstart
@@ -28,13 +29,13 @@ bash setup.sh
 ```
 
 2. Fill args templates for your environment:
-- `configs/paper_foreground.args`
+- `configs/paper_method.args`
 - `configs/paper_reviewer.args`
 
-3. Run foreground segmentation:
+3. Run foreground method:
 
 ```bash
-bash scripts/run_paper_foreground.sh
+bash scripts/run_paper_method.sh
 ```
 
 4. Run reviewer QC:
@@ -78,10 +79,10 @@ python vlm_reviewer.py \
 - Stage 5 reranking recommendation: prefer Gemini 3.1 Pro for best quality; use Flash when cost/latency is the priority. For Gemini backends, keep `--stage5-gemini-thinking-level High`.
 - Reviewer recommendation: prefer Gemini 3.1 Pro with thinking high; in `vlm_reviewer.py`, `--thinking-level High` is already the default.
 
-Example foreground command pattern:
+Example method command pattern:
 
 ```bash
-python run_foreground_pipeline.py \
+python run_foreground_method.py \
   --wsi /path/to/case.svs \
   --output-root runs/foreground \
   --skip-stage2 \
@@ -110,6 +111,6 @@ See `docs/stage_outputs.md` for stage-level output contracts.
 
 - `docs/installation.md`: conda + requirements setup
 - `docs/scripts.md`: CLI map for kept scripts
-- `docs/foreground_pipeline.md`: stage-by-stage method logic
+- `docs/foreground_method.md`: stage-by-stage method logic
 - `docs/reviewer.md`: reviewer inputs/outputs and JSON schema
 - `docs/stage_outputs.md`: output directory/file semantics

@@ -6,11 +6,11 @@ This document lists the scripts intentionally kept in the release-pruned reposit
 
 ## Canonical Run Wrappers
 
-### `scripts/run_paper_foreground.sh`
-Runs `run_foreground_pipeline.py` using one-argument-per-line args from `configs/paper_foreground.args`.
+### `scripts/run_paper_method.sh`
+Runs `run_foreground_method.py` using one-argument-per-line args from `configs/paper_method.args`.
 
 ```bash
-bash scripts/run_paper_foreground.sh [optional_args_file]
+bash scripts/run_paper_method.sh [optional_args_file]
 ```
 
 ### `scripts/run_paper_reviewer.sh`
@@ -22,17 +22,20 @@ bash scripts/run_paper_reviewer.sh [optional_args_file]
 
 ## Orchestrator
 
-### `run_foreground_pipeline.py`
+### `run_foreground_method.py`
 Stage 1-7 foreground method orchestrator.
 
+### `run_auto_context_method.py`
+Alias entrypoint for the same method runner.
+
 ```bash
-python run_foreground_pipeline.py --wsi /path/to/slide.svs [options]
+python run_foreground_method.py --wsi /path/to/slide.svs [options]
 ```
 
 Typical paper policy:
 
 ```bash
-python run_foreground_pipeline.py \
+python run_foreground_method.py \
   --wsi /path/to/slide.svs \
   --skip-stage2 \
   --stage3-method kmeans

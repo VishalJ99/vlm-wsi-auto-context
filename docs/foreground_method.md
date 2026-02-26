@@ -2,7 +2,7 @@
 
 This repository uses a staged method for foreground tissue segmentation in whole slide images.
 
-Canonical orchestrator: `run_foreground_pipeline.py`
+Canonical orchestrator: `run_foreground_method.py`
 
 ## Stage Map
 
@@ -37,15 +37,15 @@ Reviewer-guided Stage 3 reruns are external/manual (not currently auto-wired in 
 Use wrapper + args file for reproducibility:
 
 ```bash
-bash scripts/run_paper_foreground.sh
+bash scripts/run_paper_method.sh
 ```
 
 Or call directly:
 
 ```bash
-python run_foreground_pipeline.py \
+python run_foreground_method.py \
   --wsi /path/to/slide.svs \
-  --output-root runs/paper_foreground \
+  --output-root runs/paper_method \
   --skip-stage2 \
   --stage3-method kmeans
 ```

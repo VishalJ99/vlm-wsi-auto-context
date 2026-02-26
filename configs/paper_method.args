@@ -5,10 +5,10 @@
 /path/to/wsi.svs
 
 --output-root
-runs/paper_foreground
+runs/paper_method
 
 --run-id
-paper_foreground_v1
+paper_method_v1
 
 --skip-stage2
 
