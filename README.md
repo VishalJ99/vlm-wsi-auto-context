@@ -7,9 +7,7 @@ This repository contains a minimal codebase for:
 
 ## Method Figure (Figure 1)
 
-![Figure 1 method](docs/figures/figure1_pipeline/figure1_rendered_from_paper.png)
-
-Rendered Figure 1 is extracted directly from the paper PDF. Raw panel assets are available in `docs/figures/figure1_pipeline/`.
+![Figure 1 method](docs/figures/method/auto_context_method_fig.png)
 
 ## Canonical Entry Points
 
