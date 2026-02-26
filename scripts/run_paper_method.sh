@@ -16,4 +16,4 @@ if [[ "${#ARGS[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-exec python "${REPO_ROOT}/run_foreground_method.py" "${ARGS[@]}"
+exec python "${REPO_ROOT}/run_auto_context.py" "${ARGS[@]}"

@@ -57,7 +57,7 @@ Most kept scripts also accept explicit credential flags; if omitted, they fall b
 ## Smoke Checks
 
 ```bash
-python run_foreground_method.py --help
+python run_auto_context.py --help
 python run_vlm_bbox_inference.py --help
 python run_vlm_reviewer_batch.py --help
 ```

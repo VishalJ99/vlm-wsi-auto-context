@@ -704,7 +704,7 @@ def materialize_stage4_no_icl_baseline_fallback(
         "fallback": {
             "used": True,
             "reason": STAGE45_SKIP_REASON_NO_ICL_BASELINE,
-            "created_by": "run_foreground_method.py",
+            "created_by": "run_auto_context.py",
             "created_at": datetime.now().isoformat(),
         },
         "reproducibility": {
@@ -781,7 +781,7 @@ def materialize_stage5_disable_icl_fallback(
             "used": True,
             "reason": STAGE45_SKIP_REASON_NO_ICL_BASELINE,
             "disable_icl": True,
-            "created_by": "run_foreground_method.py",
+            "created_by": "run_auto_context.py",
             "created_at": datetime.now().isoformat(),
         },
         "reproducibility": {
@@ -791,7 +791,7 @@ def materialize_stage5_disable_icl_fallback(
     }
     write_json(stage5_dir / "metadata.json", metadata)
     (stage5_dir / "reproduce.txt").write_text(
-        "Synthetic fallback created by run_foreground_method.py "
+        "Synthetic fallback created by run_auto_context.py "
         "because no-ICL baseline mode skipped Stage 4/5.\n",
         encoding="utf-8",
     )
@@ -940,7 +940,7 @@ def materialize_stage5_no_points_fallback(
             "reason": "stage4_no_points",
             "stage4_points_total": int(stage4_points_summary.get("total_points", 0)),
             "stage4_points_source": stage4_points_summary.get("source"),
-            "created_by": "run_foreground_method.py",
+            "created_by": "run_auto_context.py",
             "created_at": datetime.now().isoformat(),
         },
         "reproducibility": {
@@ -950,7 +950,7 @@ def materialize_stage5_no_points_fallback(
     }
     write_json(stage5_dir / "metadata.json", metadata)
     (stage5_dir / "reproduce.txt").write_text(
-        "Synthetic fallback created by run_foreground_method.py "
+        "Synthetic fallback created by run_auto_context.py "
         "because Stage 4 produced no points.\n",
         encoding="utf-8",
     )

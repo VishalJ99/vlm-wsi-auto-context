@@ -2,7 +2,7 @@
 
 This repository uses a staged method for foreground tissue segmentation in whole slide images.
 
-Canonical orchestrator: `run_foreground_method.py`
+Canonical orchestrator: `run_auto_context.py`
 
 ## Stage Map
 
@@ -43,7 +43,7 @@ bash scripts/run_paper_method.sh
 Or call directly:
 
 ```bash
-python run_foreground_method.py \
+python run_auto_context.py \
   --wsi /path/to/slide.svs \
   --output-root runs/paper_method \
   --skip-stage2 \

@@ -11,8 +11,7 @@ This repository contains a minimal codebase for:
 
 ## Canonical Entry Points
 
-- Foreground method: `run_foreground_method.py`
-- Auto-context alias: `run_auto_context_method.py`
+- Auto-context method: `run_auto_context.py`
 - Reviewer batch runner: `run_vlm_reviewer_batch.py`
 
 For reproducible runs, use the wrapper scripts:
@@ -82,7 +81,7 @@ python vlm_reviewer.py \
 Example method command pattern:
 
 ```bash
-python run_foreground_method.py \
+python run_auto_context.py \
   --wsi /path/to/case.svs \
   --output-root runs/foreground \
   --skip-stage2 \
