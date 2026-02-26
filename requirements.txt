@@ -1,0 +1,3 @@
+# Project-level Python requirements for the release-pruned foreground + reviewer pipeline.
+# Keep this as the canonical pip entrypoint; requirements_pipeline.txt contains detailed notes.
+-r requirements_pipeline.txt

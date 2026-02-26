@@ -1,0 +1,18 @@
+Classify this high‑magnification patch from a whole slide image and score focus quality using the labeled examples and criteria below.
+
+{CLASS_DEFS}
+
+Respond with ONLY a JSON object (no other text):
+{{"class": "<label>", "quality": "<Sharp|Somewhat Blurred|Out of Focus|NA>", "reasoning": "<brief explanation>"}}
+
+Quality score criteria:
+- Sharp: Crisp structures, boundaries and edge detail.
+- Somewhat Blurred: Identifiable structures but lacking definition.
+- Out of Focus: Little to no recognizable structure beyond blobs of colour.
+
+Examples:
+{EXAMPLES_BLOCK}
+
+Now classify this patch:
+{QUERY_IMAGE}
+

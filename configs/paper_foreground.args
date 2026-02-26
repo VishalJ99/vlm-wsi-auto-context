@@ -1,0 +1,23 @@
+# Pinned paper foreground pipeline run.
+# One argument per line. Blank lines and comments are ignored.
+
+--wsi
+/path/to/wsi.svs
+
+--output-root
+runs/paper_foreground
+
+--run-id
+paper_foreground_v1
+
+--skip-stage2
+
+--stage3-method
+kmeans
+
+# Pinned VLM stack used across Stage 1/2/4/5/6.
+--allstage-backend
+openrouter
+
+--allstage-model
+google/gemini-3-flash-preview

@@ -1,0 +1,36 @@
+# Pinned paper reviewer batch run.
+# One argument per line. Blank lines and comments are ignored.
+
+--baseline-dir
+runs/paper_foreground
+
+--run-selection
+latest
+
+--output-root
+runs/paper_reviewer
+
+--batch-name
+paper_reviewer_v1
+
+--prompt-file
+prompts/reviewer.txt
+
+--model
+gemini-3-pro-preview
+
+--gemini-use-vertex
+--gemini-location
+global
+
+--max-concurrent-requests
+4
+
+--thinking-level
+High
+
+--temperature
+0.0
+
+--max-tokens
+8192
