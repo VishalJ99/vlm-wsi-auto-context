@@ -102,6 +102,27 @@ User-preferred defaults for this workflow:
 - If using ICL with `--stage6-icl-k 1`, add `--stage2-force-read-l0` so Stage 4 point grounding and review crops use higher-resolution bbox regions.
 - If running a no-ICL baseline with `--stage6-icl-k 0`, leave `--stage2-force-read-l0` unset unless the user explicitly wants higher-res reviewer crops.
 - Stage 6 patch-classification TTA is separate (`--stage6-rotations`) and defaults to `0`; do not enable it unless evaluating that cost/quality tradeoff.
+- OpenRouter keys may be exported from `~/.zshrc`; non-interactive `bash` commands may need to source that file or pass `--stage*-api-key` explicitly. Never print the key value in logs.
+- Default Stage 6 local patch classification expects a vLLM OpenAI-compatible server at `http://localhost:8000/v1`.
+
+Start the default Qwen3-VL 8B server only when needed, from an environment that has `vllm` installed:
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct-FP8 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 8192 \
+  --dtype float16 \
+  --trust-remote-code
+```
+
+Before a full run, verify it is reachable:
+
+```bash
+curl -sS http://localhost:8000/v1/models
+```
 
 Example:
 
