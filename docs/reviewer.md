@@ -20,6 +20,28 @@ python run_vlm_reviewer_batch.py \
   --batch-name paper_reviewer_v1
 ```
 
+## TRIDENT / External Mask Workflow
+
+TRIDENT emits GeoJSON contours, not this repo's Stage 3 crop/mask layout. Export
+TRIDENT contours first:
+
+```bash
+python scripts/export_trident_reviewer_inputs.py \
+  --wsi /path/to/slide.svs \
+  --trident-job-dir /path/to/trident_output \
+  --output-root runs/trident_reviewer_inputs
+```
+
+Then review the exported inputs:
+
+```bash
+python run_vlm_reviewer_batch.py \
+  --baseline-dir runs/trident_reviewer_inputs \
+  --run-selection latest \
+  --output-root runs/paper_reviewer \
+  --batch-name trident_reviewer_v1
+```
+
 ## Single-Item Workflow
 
 ```bash

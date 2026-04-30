@@ -94,6 +94,10 @@ legacy_methods/
 /stage6_output
 gemini_cookbooks/
 skills/
+!skills/
+skills/*
+!skills/wsi-foreground-segmentation-review/
+!skills/wsi-foreground-segmentation-review/**
 tmp
 baseline
 baseline_qwen2b_w32

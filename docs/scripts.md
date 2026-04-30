@@ -84,6 +84,19 @@ python vlm_reviewer.py --crop <png> --mask <png> [options]
 ### `materialize_stage1_from_xml.py`
 Converts XML-derived detections into Stage 1-compatible outputs for downstream method use.
 
+### `scripts/export_trident_reviewer_inputs.py`
+Converts TRIDENT `contours_geojson/<slide>.geojson` foreground contours into this repo's
+Stage 3-style reviewer inputs:
+
+```bash
+python scripts/export_trident_reviewer_inputs.py \
+  --wsi /path/to/slide.svs \
+  --trident-job-dir /path/to/trident_job \
+  --output-root runs/trident_reviewer_inputs
+```
+
+The output can be passed directly to `run_vlm_reviewer_batch.py --baseline-dir`.
+
 ## Credential Notes
 
 For Gemini Vertex paths in kept scripts:

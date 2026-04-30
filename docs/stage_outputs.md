@@ -134,3 +134,24 @@ Key files:
 - `results.jsonl`
 - `manifest.json`
 - optional overlay/debug artifacts
+
+## TRIDENT Reviewer Input Export
+Script: `scripts/export_trident_reviewer_inputs.py`
+
+Output root:
+
+```text
+<output_root>/<case_id>/<YYYYMMDD_HHMMSS>/
+```
+
+Key files:
+- `metadata.json`
+- `reproduction.txt`
+- `manifest.csv`
+- `manifest.jsonl`
+- `bboxes/<core_id>/stage3/crop.png`
+- `bboxes/<core_id>/stage3/mask.png`
+- `bboxes/<core_id>/stage3/overlay.png`
+- `bboxes/<core_id>/stage3/metadata.json`
+
+This layout is intentionally compatible with `run_vlm_reviewer_batch.py --baseline-dir`.
