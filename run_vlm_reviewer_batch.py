@@ -21,6 +21,11 @@ from PIL import Image
 
 from utils.model_pricing import estimate_review_cost_usd
 from vlm_reviewer import (
+    DEFAULT_OPENROUTER_REFERER,
+    DEFAULT_OPENROUTER_URL,
+    DEFAULT_VLLM_URL,
+    OpenRouterRunner,
+    VLLMRunner,
     build_green_overlay,
     build_parts,
     get_git_commit_hash,
@@ -196,6 +201,26 @@ class GeminiReviewerRunner:
         }
 
 
+class GenericReviewerRunner:
+    """Adapter for OpenRouter/vLLM runners that expose run_full or run."""
+
+    def __init__(self, runner: Any):
+        self.runner = runner
+
+    def run_with_status(self, parts: List[dict]) -> Dict[str, Any]:
+        if hasattr(self.runner, "run_full"):
+            return self.runner.run_full(parts)
+        text = self.runner.run(parts)
+        return {
+            "text": (text or "").strip(),
+            "thoughts": [],
+            "usage": {},
+            "finish_reason": None,
+            "error": None if text else "empty_response",
+            "attempts": None,
+        }
+
+
 def parse_json_response_relaxed(text: str) -> Optional[dict]:
     raw = (text or "").strip()
     if not raw:
@@ -306,20 +331,46 @@ def collect_tasks(
     return tasks
 
 
-def get_thread_runner(args: argparse.Namespace) -> GeminiReviewerRunner:
+def get_thread_runner(args: argparse.Namespace) -> Any:
     runner = getattr(THREAD_LOCAL, "runner", None)
     if runner is None:
-        runner = GeminiReviewerRunner(
-            model=args.model,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            max_retries=args.max_retries,
-            use_vertex=args.gemini_use_vertex,
-            credentials_path=args.gemini_credentials,
-            location=args.gemini_location,
-            thinking_level=args.thinking_level,
-            include_thoughts=args.include_thoughts,
-        )
+        if args.backend == "gemini":
+            runner = GeminiReviewerRunner(
+                model=args.model,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                max_retries=args.max_retries,
+                use_vertex=args.gemini_use_vertex,
+                credentials_path=args.gemini_credentials,
+                location=args.gemini_location,
+                thinking_level=args.thinking_level,
+                include_thoughts=args.include_thoughts,
+            )
+        elif args.backend == "openrouter":
+            runner = GenericReviewerRunner(
+                OpenRouterRunner(
+                    model=args.model,
+                    api_key=args.openrouter_api_key,
+                    url=args.openrouter_url,
+                    timeout=args.timeout,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                    max_retries=args.max_retries,
+                    referer=args.openrouter_referer,
+                    reasoning_effort=args.reasoning_effort,
+                )
+            )
+        else:
+            runner = GenericReviewerRunner(
+                VLLMRunner(
+                    model=args.model,
+                    url=args.vllm_url,
+                    timeout=args.timeout,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                    max_retries=args.max_retries,
+                )
+            )
         THREAD_LOCAL.runner = runner
     return runner
 
@@ -377,15 +428,21 @@ def build_item_metadata(
         },
         "prompt": prompt_text,
         "prompt_file": args.prompt_file,
+        "backend": args.backend,
         "model": args.model,
         "thinking_level": args.thinking_level,
         "include_thoughts": args.include_thoughts,
         "temperature": args.temperature,
         "max_tokens": args.max_tokens,
         "max_retries": args.max_retries,
+        "timeout": args.timeout,
         "gemini_use_vertex": args.gemini_use_vertex,
         "gemini_credentials": args.gemini_credentials,
         "gemini_location": args.gemini_location,
+        "openrouter_url": args.openrouter_url,
+        "openrouter_referer": args.openrouter_referer,
+        "reasoning_effort": args.reasoning_effort,
+        "vllm_url": args.vllm_url,
         "overlay_alpha": args.overlay_alpha,
         "mask_threshold": args.mask_threshold,
         "elapsed_seconds": elapsed,
@@ -573,7 +630,7 @@ def write_manifest(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Batch process baseline Stage 3 bboxes with Gemini reviewer and save per-bbox reviews "
+            "Batch process baseline Stage 3 bboxes with a VLM reviewer and save per-bbox reviews "
             "for manual validation/agreement analysis."
         )
     )
@@ -600,7 +657,7 @@ def parse_args() -> argparse.Namespace:
     out.add_argument("--no-resume", dest="resume", action="store_false", help="Do not skip existing items")
     out.add_argument("--overwrite", action="store_true", help="Force rerun even if output already exists")
     out.add_argument("--progress-every", type=int, default=10, help="Print progress every N completed items (default: 10)")
-    out.add_argument("--dry-run", action="store_true", help="Only enumerate tasks; do not call Gemini")
+    out.add_argument("--dry-run", action="store_true", help="Only enumerate tasks; do not call the VLM")
     parser.set_defaults(resume=True)
 
     review = parser.add_argument_group("Reviewer")
@@ -612,17 +669,24 @@ def parse_args() -> argparse.Namespace:
         "--max-concurrent-requests",
         type=int,
         default=4,
-        help="Max concurrent Gemini requests (default: 4)",
+        help="Max concurrent VLM requests (default: 4)",
     )
 
-    vlm = parser.add_argument_group("Gemini")
-    vlm.add_argument("--model", default=DEFAULT_MODEL, help=f"Gemini model (default: {DEFAULT_MODEL})")
+    vlm = parser.add_argument_group("VLM Backend")
+    vlm.add_argument(
+        "--backend",
+        choices=["gemini", "openrouter", "vllm"],
+        default="gemini",
+        help="Inference backend (default: gemini).",
+    )
+    vlm.add_argument("--model", default=DEFAULT_MODEL, help=f"Model ID (default: {DEFAULT_MODEL})")
     vlm.add_argument("--thinking-level", default="High", help="Thinking level (default: High)")
     vlm.add_argument("--include-thoughts", action="store_true", default=False, help="Request thought summaries")
     vlm.add_argument("--no-include-thoughts", dest="include_thoughts", action="store_false", help="Disable thought summaries")
     vlm.add_argument("--temperature", type=float, default=0.0, help="Temperature (default: 0.0)")
     vlm.add_argument("--max-tokens", type=int, default=8192, help="Max output tokens (default: 8192)")
     vlm.add_argument("--max-retries", type=int, default=3, help="Max retries per request (default: 3)")
+    vlm.add_argument("--timeout", type=int, default=120, help="HTTP timeout for openrouter/vllm backends (default: 120)")
     vlm.add_argument("--gemini-use-vertex", dest="gemini_use_vertex", action="store_true")
     vlm.add_argument("--gemini-no-vertex", dest="gemini_use_vertex", action="store_false")
     vlm.add_argument(
@@ -631,6 +695,19 @@ def parse_args() -> argparse.Namespace:
         help="Optional Vertex service account JSON path. If unset, use GOOGLE_APPLICATION_CREDENTIALS.",
     )
     vlm.add_argument("--gemini-location", default="global", help="Vertex location (default: global)")
+    vlm.add_argument("--openrouter-api-key", default=None, help="OpenRouter API key (optional if env set)")
+    vlm.add_argument(
+        "--openrouter-url",
+        default=DEFAULT_OPENROUTER_URL,
+        help=f"OpenRouter URL (default: {DEFAULT_OPENROUTER_URL})",
+    )
+    vlm.add_argument(
+        "--openrouter-referer",
+        default=DEFAULT_OPENROUTER_REFERER,
+        help=f"OpenRouter referer header (default: {DEFAULT_OPENROUTER_REFERER})",
+    )
+    vlm.add_argument("--reasoning-effort", default=None, help="OpenRouter reasoning effort")
+    vlm.add_argument("--vllm-url", default=DEFAULT_VLLM_URL, help=f"vLLM URL (default: {DEFAULT_VLLM_URL})")
     parser.set_defaults(gemini_use_vertex=True)
 
     args = parser.parse_args()
@@ -704,6 +781,7 @@ def main() -> int:
     print(f"Skipped existing:     {skipped_existing}")
     print(f"Scheduled items:      {len(scheduled)}")
     print(f"Max concurrent reqs:  {args.max_concurrent_requests}")
+    print(f"Backend:              {args.backend}")
     print(f"Model:                {args.model}")
     print(f"Thinking level:       {args.thinking_level}")
     print(f"Include thoughts:     {args.include_thoughts}")

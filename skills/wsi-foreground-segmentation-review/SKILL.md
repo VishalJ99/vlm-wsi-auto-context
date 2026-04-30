@@ -167,6 +167,28 @@ python run_vlm_reviewer_batch.py \
   --temperature 0.0
 ```
 
+If the run used `--stage6-icl-k 0` and did not use `--stage2-force-read-l0`,
+export high-resolution reviewer inputs from the final Stage 7 masks before
+reviewing. This avoids sending thumbnail-derived Stage 3 crops to the reviewer:
+
+```bash
+python scripts/export_auto_context_reviewer_inputs.py \
+  --run-dir runs/foreground/<case>/<run_id> \
+  --output-root runs/auto_context_reviewer_inputs \
+  --max-dim 2048 \
+  --padding-frac 0.02
+
+python run_vlm_reviewer_batch.py \
+  --baseline-dir runs/auto_context_reviewer_inputs \
+  --run-selection latest \
+  --output-root runs/reviewer \
+  --batch-name foreground_stage7_review_v1 \
+  --prompt-file prompts/objective_reviewer.txt \
+  --backend openrouter \
+  --model google/gemini-3-flash-preview \
+  --max-concurrent-requests 2
+```
+
 Batch reviewer discovers:
 
 ```text

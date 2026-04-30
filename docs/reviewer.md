@@ -51,6 +51,43 @@ python vlm_reviewer.py \
   --overlay /path/to/overlay.png
 ```
 
+## Auto-Context Stage 7 High-Resolution Bbox Workflow
+
+If the foreground run did not use `--stage2-force-read-l0`, the original
+`bboxes/*/stage3/crop.png` files may be thumbnail-derived and too blurry for
+review. Export reviewer inputs from the final Stage 7 patch-grid mask instead:
+
+```bash
+python scripts/export_auto_context_reviewer_inputs.py \
+  --run-dir runs/auto_context_pilot/<case>/<run_id> \
+  --output-root runs/auto_context_reviewer_inputs \
+  --max-dim 2048 \
+  --padding-frac 0.02
+```
+
+This writes:
+
+```text
+runs/auto_context_reviewer_inputs/<case>/<run_id>_stage7_l0_review/bboxes/<bbox>/stage3/crop.png
+runs/auto_context_reviewer_inputs/<case>/<run_id>_stage7_l0_review/bboxes/<bbox>/stage3/mask.png
+runs/auto_context_reviewer_inputs/<case>/<run_id>_stage7_l0_review/bboxes/<bbox>/stage3/overlay.png
+```
+
+Then run the batch reviewer on the exported root. OpenRouter is useful when
+Vertex model access is unavailable:
+
+```bash
+python run_vlm_reviewer_batch.py \
+  --baseline-dir runs/auto_context_reviewer_inputs \
+  --run-selection latest \
+  --output-root runs/reviewer \
+  --batch-name auto_context_stage7_review_v1 \
+  --prompt-file prompts/objective_reviewer.txt \
+  --backend openrouter \
+  --model google/gemini-3-flash-preview \
+  --max-concurrent-requests 2
+```
+
 ## Output Schema (Batch)
 
 `results.jsonl` stores one JSON object per reviewed item. Common fields include:
