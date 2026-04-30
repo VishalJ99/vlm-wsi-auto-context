@@ -105,9 +105,13 @@ User-preferred defaults for this workflow:
 - OpenRouter keys may be exported from `~/.zshrc`; non-interactive `bash` commands may need to source that file or pass `--stage*-api-key` explicitly. Never print the key value in logs.
 - Default Stage 6 local patch classification expects a vLLM OpenAI-compatible server at `http://localhost:8000/v1`.
 
-Start the default Qwen3-VL 8B server only when needed, from an environment that has `vllm` installed:
+Start the default Qwen3-VL 8B server only when needed, from an environment that has `vllm` installed. Keep Hugging Face and vLLM caches on local `/data2` storage; putting model weights or compile caches on `/vol/biomedic3` can make startup appear hung in NFS wait before any GPU memory is allocated.
 
 ```bash
+export HF_HOME=/data2/vj724/hf_cache
+export HF_HUB_CACHE=/data2/vj724/hf_cache/hub
+export VLLM_CACHE_ROOT=/data2/vj724/vllm_cache
+
 vllm serve Qwen/Qwen3-VL-8B-Instruct-FP8 \
   --host 0.0.0.0 \
   --port 8000 \
@@ -123,6 +127,8 @@ Before a full run, verify it is reachable:
 ```bash
 curl -sS http://localhost:8000/v1/models
 ```
+
+To use multiple available GPUs, start one vLLM server per GPU on separate ports and point separate WSI or bbox-level jobs at different `--stage6-vllm-url` values. Check port availability first with `ss -ltn 'sport = :8001'`; do not assume 8001 is free.
 
 Example:
 

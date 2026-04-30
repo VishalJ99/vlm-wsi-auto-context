@@ -242,7 +242,11 @@ def load_case_allowlist(path: Optional[str]) -> Optional[set[str]]:
 
 
 def is_run_dir(path: Path) -> bool:
-    return path.is_dir() and bool(RUN_ID_RE.match(path.name))
+    if not path.is_dir():
+        return False
+    if RUN_ID_RE.match(path.name):
+        return True
+    return (path / "bboxes").is_dir()
 
 
 def list_case_run_dirs(case_dir: Path, run_selection: str) -> List[Path]:
