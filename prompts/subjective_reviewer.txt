@@ -33,6 +33,8 @@ Requirement: Compare the spatial boundaries of the mask against the biological s
 
 Grade the precision (how pure is the overlay?) and recall (how complete is tissue covereage?) as excellent, good, okay, or bad based on your expert impression.
 
+Stair-stepping or blocky patch-edge artifacts are acceptable when they run along the edges of tissue cores; do not penalize them unless they clearly include non-tissue or exclude tissue.
+
 </context_anchoring>
 
 
