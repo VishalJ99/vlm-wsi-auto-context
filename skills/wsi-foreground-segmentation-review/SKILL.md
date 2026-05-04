@@ -82,7 +82,7 @@ python run_vlm_reviewer_batch.py \
   --run-selection latest \
   --output-root runs/reviewer \
   --batch-name trident_hest_review_v1 \
-  --prompt-file prompts/objective_reviewer.txt \
+  --prompt-file prompts/calibration_reviewer.txt \
   --model gemini-3-pro-preview \
   --gemini-use-vertex \
   --thinking-level High \
@@ -160,7 +160,7 @@ python run_vlm_reviewer_batch.py \
   --run-selection latest \
   --output-root runs/reviewer \
   --batch-name foreground_review_v1 \
-  --prompt-file prompts/objective_reviewer.txt \
+  --prompt-file prompts/calibration_reviewer.txt \
   --model gemini-3-pro-preview \
   --gemini-use-vertex \
   --thinking-level High \
@@ -183,7 +183,7 @@ python run_vlm_reviewer_batch.py \
   --run-selection latest \
   --output-root runs/reviewer \
   --batch-name foreground_stage7_review_v1 \
-  --prompt-file prompts/objective_reviewer.txt \
+  --prompt-file prompts/calibration_reviewer.txt \
   --backend openrouter \
   --model google/gemini-3-flash-preview \
   --max-concurrent-requests 2
@@ -217,7 +217,7 @@ The likely clean integration is: keep Stage 1 bbox detection, optional Stage 3 g
 
 A separate review skill is usually unnecessary: review is just a VLM call over a source crop plus a mask or overlay, using the prompt files in `prompts/`. Keep it in this skill unless users start asking for review-only workflows independent of foreground segmentation.
 
-Use `prompts/objective_reviewer.txt` for sortable QC; use `prompts/subjective_reviewer.txt` for narrative expert judgment; use `prompts/calibration_reviewer.txt` when calibrating thresholds or comparing reviewer behavior.
+Use `prompts/calibration_reviewer.txt` for numeric precision/recall calibration and sortable QC. Use `prompts/subjective_reviewer.txt` for narrative expert judgment. Treat `prompts/objective_reviewer.txt` as a legacy prompt that should not be used for foreground review unless explicitly comparing old runs.
 
 Escalation policy:
 

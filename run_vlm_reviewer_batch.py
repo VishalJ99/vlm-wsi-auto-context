@@ -42,7 +42,7 @@ RATE_LIMIT_HINTS = (
     "quota",
     "too many requests",
 )
-DEFAULT_PROMPT_FILE = "prompts/reviewer.txt"
+DEFAULT_PROMPT_FILE = "prompts/calibration_reviewer.txt"
 DEFAULT_MODEL = "gemini-3-pro-preview"
 DEFAULT_OUTPUT_ROOT = "auto_reviews_batch"
 DEFAULT_BASELINE_DIR = "baseline"
@@ -227,6 +227,7 @@ def parse_json_response_relaxed(text: str) -> Optional[dict]:
         return None
 
     cleaned = raw.replace("```json", "```").replace("```", "").strip()
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
     try:
         parsed = json.loads(cleaned)
         if isinstance(parsed, dict):

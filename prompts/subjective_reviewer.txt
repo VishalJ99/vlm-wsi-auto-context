@@ -65,7 +65,7 @@ You **must** output following this structure exactly.
 
     "rating": "Excellent/Good/Okay/Bad",
 
-    "omission_notes": "Describe missed tissue regions.",
+    "omission_notes": "Describe missed tissue regions."
 
   }
 }

@@ -38,13 +38,13 @@ You **must** output following this structure exactly.
 
   "precision": {
 
-    "percentage": "X%",
+    "percentage": "X%"
 
   },
 
   "recall": {
 
-    "percentage": "X%",
+    "percentage": "X%"
 
   }
 

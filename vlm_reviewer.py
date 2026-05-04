@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -27,7 +28,7 @@ from run_vlm_bbox_inference import (
 from utils.model_pricing import estimate_review_cost_usd
 
 
-DEFAULT_PROMPT_FILE = "prompts/objective_reviewer.txt"
+DEFAULT_PROMPT_FILE = "prompts/calibration_reviewer.txt"
 DEFAULT_MODEL = "gemini-3-pro-preview"
 DEFAULT_OUTPUT_ROOT = "auto_reviews"
 
@@ -74,6 +75,7 @@ def parse_json_response(text: str) -> Optional[dict]:
     if not cleaned:
         return None
     cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
     try:
         parsed = json.loads(cleaned)
     except Exception:

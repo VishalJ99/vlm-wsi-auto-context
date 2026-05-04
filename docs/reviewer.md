@@ -82,7 +82,7 @@ python run_vlm_reviewer_batch.py \
   --run-selection latest \
   --output-root runs/reviewer \
   --batch-name auto_context_stage7_review_v1 \
-  --prompt-file prompts/objective_reviewer.txt \
+  --prompt-file prompts/calibration_reviewer.txt \
   --backend openrouter \
   --model google/gemini-3-flash-preview \
   --max-concurrent-requests 2
@@ -106,6 +106,6 @@ python run_vlm_reviewer_batch.py \
 Reviewer prompt files kept in repo:
 
 - `prompts/reviewer.txt`
-- `prompts/objective_reviewer.txt`
-- `prompts/subjective_reviewer.txt`
-- `prompts/calibration_reviewer.txt`
+- `prompts/calibration_reviewer.txt`: default for numeric precision/recall calibration.
+- `prompts/subjective_reviewer.txt`: narrative expert assessment when notes matter more than sortable percentages.
+- `prompts/objective_reviewer.txt`: legacy prompt; do not use for foreground review unless explicitly comparing old runs.
