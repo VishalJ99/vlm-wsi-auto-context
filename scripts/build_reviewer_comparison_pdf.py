@@ -74,13 +74,13 @@ RUNS = [
         label="Flash subjective",
         prompt="subjective",
         model="google/gemini-3-flash-preview",
-        batch_dir=Path("runs/reviewer_pilot/highres_stage7_review_openrouter_flash_subjective"),
+        batch_dir=Path("runs/reviewer_pilot/highres_stage7_review_openrouter_flash_subjective_stair_ok"),
     ),
     RunConfig(
         label="Gemini 3.1 Pro subjective",
         prompt="subjective",
         model="google/gemini-3.1-pro-preview",
-        batch_dir=Path("runs/reviewer_pilot/highres_stage7_review_openrouter_gemini31pro_subjective"),
+        batch_dir=Path("runs/reviewer_pilot/highres_stage7_review_openrouter_gemini31pro_subjective_stair_ok"),
     ),
 ]
 
