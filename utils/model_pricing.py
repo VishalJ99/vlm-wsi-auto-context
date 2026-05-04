@@ -21,6 +21,11 @@ MODEL_PRICING_USD_PER_MILLION: Dict[str, ModelPricing] = {
     "gemini-3-pro": ModelPricing(input_per_million_usd=2.0, output_per_million_usd=12.0),
     "google/gemini-3-pro-preview": ModelPricing(input_per_million_usd=2.0, output_per_million_usd=12.0),
     "google/gemini-3-pro": ModelPricing(input_per_million_usd=2.0, output_per_million_usd=12.0),
+    # Gemini 3.1 Pro
+    "gemini-3.1-pro-preview": ModelPricing(input_per_million_usd=2.0, output_per_million_usd=12.0),
+    "gemini-3.1-pro": ModelPricing(input_per_million_usd=2.0, output_per_million_usd=12.0),
+    "google/gemini-3.1-pro-preview": ModelPricing(input_per_million_usd=2.0, output_per_million_usd=12.0),
+    "google/gemini-3.1-pro": ModelPricing(input_per_million_usd=2.0, output_per_million_usd=12.0),
     # Gemini 3 Flash
     "gemini-3-flash-preview": ModelPricing(input_per_million_usd=0.5, output_per_million_usd=3.0),
     "gemini-3-flash": ModelPricing(input_per_million_usd=0.5, output_per_million_usd=3.0),
