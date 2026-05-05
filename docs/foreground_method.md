@@ -31,13 +31,14 @@ modes once a runnable distilled classifier exists:
    inputs, fall back to `run_auto_context.py` with `--stage6-icl-k 1` and
    `--stage2-force-read-l0`.
 
-MobileNetV3 student checkpoint artifacts are available outside this repo under
-`/vol/biomedic3/vj724/wsi-agents/distilled_student_models_20260225/` and
-`/data2/vj724/wsi-agents/tmp/student_patch_distill_explore/`; see
-`docs/data/distilled_student_models_20260225.md`. This repo still has no
-checked-in distilled dataset exporter, trainer, or Stage6-compatible inference
-runner. Verify that those scripts exist before treating the distilled route as
-runnable.
+MobileNetV3 student checkpoint artifacts and their original train/inference
+scripts are available outside this repo under
+`/vol/biomedic3/vj724/wsi-agents/distilled_student_models_20260225/`, mirrored
+locally at `/data2/vj724/wsi-agents/distilled_student_models_20260225_package/`;
+see `docs/data/distilled_student_models_20260225.md`. The package can run
+student inference on a Stage6-like patch grid. This repo still does not have a
+native `run_auto_context.py` Stage 6 adapter that swaps VLM patch calls for the
+student model and then continues Stage 7 unchanged.
 
 ## Why Stages Exist
 
@@ -50,6 +51,16 @@ runnable.
 - Stage 7 cleans masks/class maps into final postprocessed tissue masks.
 - A future distilled runner should replace Stage 6 VLM calls while preserving
   the Stage 6/7 output contract.
+
+For one-off distilled checks against existing reviewer masks, use:
+
+- `scripts/build_distilled_stage6_grid_from_reviewer_masks.py` to create a
+  Stage6-like `patches.csv` grid from reviewer `stage3/mask.png` files.
+- The packaged
+  `/data2/vj724/wsi-agents/distilled_student_models_20260225_package/scripts/student_patch_distill_export_test_overlays.py`
+  script to run the checkpoint on that grid.
+- `scripts/build_distilled_student_comparison_visuals.py` to assemble reviewer
+  comparison PNGs, an HTML index, and by-bbox metrics.
 
 ## Canonical Invocation
 

@@ -21,7 +21,7 @@ There are three foreground/background routes:
 
 1. **TRIDENT route**: fastest classical/deep baseline with TRIDENT IO. Outputs GeoJSON foreground contours, contour thumbnails, and HDF5 foreground patch coordinates.
 2. **Repo VLM route**: this repo's staged auto-context method. Outputs per-bbox Stage 3 masks, Stage 6 VLM patch classifications, and Stage 7 postprocessed tissue masks.
-3. **Distilled route**: target fast route. Run bbox detection and context stages, then replace Stage 6 VLM patch classification with a trained lightweight FG/BG patch classifier. MobileNetV3 student checkpoint artifacts exist outside this repo, but this repo did not contain the needed train/inference script when this skill was drafted or when rechecked on 2026-05-05; verify with `rg -i "distill|train|student|classifier"` before advertising it as runnable.
+3. **Distilled route**: target fast route. Run bbox detection and context stages, then replace Stage 6 VLM patch classification with a trained lightweight FG/BG patch classifier. A complete MobileNetV3 student reproducibility package exists outside this repo and includes train/inference scripts, but `run_auto_context.py` still needs a native Stage 6 adapter before the distilled route is fully integrated.
 
 Current PER-188 production target is a two-mode router, not TRIDENT-first:
 
@@ -276,9 +276,10 @@ Batch reviewer discovers:
 
 ## Route 3: Distilled Patch Classifier
 
-As drafted and rechecked on 2026-05-05, this repo has VLM teacher outputs but no
-trainer or inference runner for a distilled FG/BG patch classifier. Existing
-useful teacher artifacts:
+As updated on 2026-05-05, this repo has VLM teacher outputs and can run
+one-off distilled-student checks through the external reproducibility package,
+but it still does not have a native `run_auto_context.py` adapter that replaces
+Stage 6 VLM calls with the student model. Existing useful teacher artifacts:
 
 - Stage 6 `patches.csv`: per-patch VLM labels and metadata.
 - Stage 6 `class_map.npy` / `quality_map.npy`: per-grid labels.
@@ -286,21 +287,34 @@ useful teacher artifacts:
 
 Copied student checkpoint artifacts are available outside this repo:
 
-- Shared staging root: `/vol/biomedic3/vj724/wsi-agents/distilled_student_models_20260225/`.
-- Mnemosyne-local exploration root: `/data2/vj724/wsi-agents/tmp/student_patch_distill_explore/`.
-- `train_zero_shot_t10k_e2_mnet_20260225/mobilenetv3_large_100_best.pt`, SHA-256 `ee83e44fe3f612105fa22f6cd8f29fc5cba5d2fed3037ed14b24d1ab9b7ab7e4`.
-- `harder_qwen8bfew_t10k_e2_mnet_20260225_split22_3_7/mobilenetv3_large_100_best.pt`, SHA-256 `907cf16a2cf674f95edcdfec279d7cbcce35ec3c6332c4000d7a442dae939502`.
+- Shared authoritative package: `/vol/biomedic3/vj724/wsi-agents/distilled_student_models_20260225/`.
+- Mnemosyne-local package mirror: `/data2/vj724/wsi-agents/distilled_student_models_20260225_package/`.
+- Older mnemosyne-local exploration root: `/data2/vj724/wsi-agents/tmp/student_patch_distill_explore/`.
+- `run_artifacts/train_zero_shot_t10k_e2_mnet_20260225/mobilenetv3_large_100_best.pt`, SHA-256 `ee83e44fe3f612105fa22f6cd8f29fc5cba5d2fed3037ed14b24d1ab9b7ab7e4`.
+- `run_artifacts/harder_qwen8bfew_t10k_e2_mnet_20260225_split22_3_7/mobilenetv3_large_100_best.pt`, SHA-256 `907cf16a2cf674f95edcdfec279d7cbcce35ec3c6332c4000d7a442dae939502`.
 
 See `DATA.md` and `docs/data/distilled_student_models_20260225.md` for
-artifact details. These weights plus `results.json` files are candidate model
-artifacts; they do not make the distilled route runnable until an adapter loads
-them and writes the Stage 6 output contract.
+artifact details. The package script
+`scripts/student_patch_distill_export_test_overlays.py` can load the checkpoints
+and write student overlays from a Stage6-like patch grid. It is not yet wired
+into this repo's production foreground orchestrator.
 
-Do not claim distilled inference is implemented until the repo has at least:
+Do not claim the native distilled route is implemented until the repo has at least:
 
 - A dataset exporter from Stage 6 teacher outputs to patch image paths + FG/BG labels.
 - A train script for a lightweight patch classifier.
 - An inference runner that writes Stage6-compatible `class_map.npy`, `patches.csv`, and metadata so Stage 7 can run unchanged.
+
+For one-off review pilots from existing reviewer masks:
+
+1. Use `scripts/build_distilled_stage6_grid_from_reviewer_masks.py` to convert
+   reviewer `stage3/mask.png` files into package-compatible `stage6/patches.csv`
+   inputs. This does not call a VLM.
+2. Run the external package
+   `/data2/vj724/wsi-agents/distilled_student_models_20260225_package/scripts/student_patch_distill_export_test_overlays.py`
+   with the desired checkpoint.
+3. Use `scripts/build_distilled_student_comparison_visuals.py` to create
+   side-by-side reference/student overlays and by-bbox metrics.
 
 The likely clean integration is: keep Stage 1 bbox detection, optional Stage 3 gating, optional Stage 4/5 context generation for teacher runs, then swap Stage 6 VLM calls for the distilled classifier runner.
 
