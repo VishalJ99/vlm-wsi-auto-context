@@ -33,15 +33,20 @@ OpenRouter reasoning effort `high`, temperature `0.0`, and strict thresholding:
 
 ## TRIDENT / External Mask Workflow
 
-TRIDENT emits GeoJSON contours, not this repo's Stage 3 crop/mask layout. Export
-TRIDENT contours first:
+TRIDENT emits contour JPGs and GeoJSON contours, not this repo's Stage 3
+crop/mask layout. If the user gives a TRIDENT contour path, infer the
+corresponding `contours_geojson/<slide>.geojson`, resolve the source WSI from
+the anonymous slide ID, then export TRIDENT contours first:
 
 ```bash
 python scripts/export_trident_reviewer_inputs.py \
-  --wsi /path/to/slide.svs \
-  --trident-job-dir /path/to/trident_output \
+  --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
   --output-root runs/trident_reviewer_inputs
 ```
+
+The exporter also accepts `--geojson`, `--trident-job-dir`, and explicit
+`--wsi`. If `--wsi` is omitted, it resolves `anon_<uuid>.svs` via known local
+WSI manifests, including `/data2/vj724/wsi-agents/all_svs_fpaths.csv`.
 
 Then review the exported inputs:
 

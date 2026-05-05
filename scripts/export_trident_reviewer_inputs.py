@@ -35,6 +35,15 @@ Point = Tuple[float, float]
 Ring = List[Point]
 PolygonRings = List[Ring]
 BBox = Tuple[int, int, int, int]
+DEFAULT_WSI_MANIFESTS = [
+    Path("/data2/vj724/wsi-agents/all_svs_fpaths.csv"),
+    Path("/data2/vj724/benchmark_label_image_ocr/svs_file_paths.txt"),
+    Path("/data2/vj724/anon_filenames_mapping.txt"),
+]
+DEFAULT_WSI_ROOTS = [
+    Path("/vol/biomedic3/histopatho/win_share"),
+    Path("/data2/vj724"),
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,14 +53,42 @@ def parse_args() -> argparse.Namespace:
             "from a TRIDENT contours_geojson slide output."
         )
     )
-    parser.add_argument("--wsi", required=True, help="Path to the source WSI.")
+    parser.add_argument("--wsi", default=None, help="Path to the source WSI.")
+    parser.add_argument(
+        "--slide-id",
+        default=None,
+        help="Slide stem or filename, e.g. anon_<uuid>.svs. Inferred from --wsi, --geojson, or --contour.",
+    )
+    parser.add_argument(
+        "--contour",
+        default=None,
+        help="TRIDENT contours/<slide>.jpg. Used to infer contours_geojson/<slide>.geojson and slide ID.",
+    )
     parser.add_argument(
         "--geojson",
         help="TRIDENT contours_geojson/<slide>.geojson. If omitted, use --trident-job-dir.",
     )
     parser.add_argument(
         "--trident-job-dir",
-        help="TRIDENT job dir containing contours_geojson/<slide_stem>.geojson.",
+        help="TRIDENT job dir containing contours_geojson/<slide_stem>.geojson. Inferred from --contour when possible.",
+    )
+    parser.add_argument(
+        "--wsi-manifest",
+        action="append",
+        default=[],
+        help=(
+            "WSI lookup manifest. May be a one-path-per-line file, relative path list, "
+            "or TSV mapping. Repeatable. Defaults include known /data2/vj724 manifests."
+        ),
+    )
+    parser.add_argument(
+        "--wsi-root",
+        action="append",
+        default=[],
+        help=(
+            "Root used to resolve relative WSI paths from manifests. Repeatable. "
+            "Defaults include /vol/biomedic3/histopatho/win_share."
+        ),
     )
     parser.add_argument(
         "--output-root",
@@ -114,17 +151,103 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_geojson(wsi_path: Path, geojson: Optional[str], trident_job_dir: Optional[str]) -> Path:
+def slide_stem(value: str | Path) -> str:
+    path = Path(str(value))
+    return path.stem if path.suffix else path.name
+
+
+def infer_slide_id(args: argparse.Namespace) -> str:
+    for value in [args.slide_id, args.wsi, args.geojson, args.contour]:
+        if value:
+            return slide_stem(value)
+    raise SystemExit("Cannot infer slide ID. Provide --slide-id, --wsi, --geojson, or --contour.")
+
+
+def infer_trident_job_dir(contour: Optional[str], trident_job_dir: Optional[str]) -> Optional[Path]:
+    if trident_job_dir:
+        return Path(trident_job_dir)
+    if not contour:
+        return None
+    contour_path = Path(contour)
+    if contour_path.parent.name == "contours":
+        return contour_path.parent.parent
+    return None
+
+
+def manifest_tokens(line: str) -> List[str]:
+    parts: List[str] = []
+    for chunk in line.strip().split("\t"):
+        for subchunk in chunk.split(","):
+            value = subchunk.strip().strip("\"'")
+            if value:
+                parts.append(value)
+    return parts
+
+
+def materialize_manifest_path(value: str, roots: Sequence[Path]) -> List[Path]:
+    raw = Path(value).expanduser()
+    candidates = [raw]
+    if not raw.is_absolute():
+        stripped = value[2:] if value.startswith("./") else value
+        for root in roots:
+            candidates.append(root / stripped)
+    return candidates
+
+
+def resolve_wsi_from_manifests(slide_id: str, manifests: Sequence[Path], roots: Sequence[Path]) -> Tuple[Path, Optional[Path]]:
+    target_stems = {Path(slide_id).stem, Path(slide_id).with_suffix(".svs").stem}
+    fallback: Optional[Tuple[Path, Path]] = None
+    for manifest in manifests:
+        if not manifest.is_file():
+            continue
+        for line in manifest.read_text(errors="ignore").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            for token in manifest_tokens(line):
+                token_path = Path(token)
+                if token_path.stem not in target_stems:
+                    continue
+                for candidate in materialize_manifest_path(token, roots):
+                    if candidate.is_file():
+                        return candidate.resolve(), manifest
+                    if fallback is None:
+                        fallback = (candidate, manifest)
+    if fallback is not None:
+        candidate, manifest = fallback
+        raise SystemExit(f"Resolved WSI candidate does not exist: {candidate} (from {manifest})")
+    searched = ", ".join(str(p) for p in manifests if p.is_file()) or "no existing manifests"
+    raise SystemExit(f"Could not resolve WSI for slide ID '{slide_id}' from {searched}")
+
+
+def resolve_wsi(args: argparse.Namespace, slide_id: str) -> Tuple[Path, Optional[Path]]:
+    if args.wsi:
+        path = Path(args.wsi).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"WSI not found: {path}")
+        return path.resolve(), None
+
+    manifests = [Path(p).expanduser() for p in args.wsi_manifest] + DEFAULT_WSI_MANIFESTS
+    roots = [Path(p).expanduser() for p in args.wsi_root] + DEFAULT_WSI_ROOTS
+    return resolve_wsi_from_manifests(slide_id, manifests, roots)
+
+
+def resolve_geojson(slide_id: str, geojson: Optional[str], contour: Optional[str], trident_job_dir: Optional[Path]) -> Path:
     if geojson:
         path = Path(geojson)
+    elif contour:
+        contour_path = Path(contour)
+        if contour_path.parent.name == "contours":
+            path = contour_path.parent.parent / "contours_geojson" / f"{contour_path.stem}.geojson"
+        else:
+            raise SystemExit("Cannot infer GeoJSON from --contour unless it is under a contours/ directory.")
     elif trident_job_dir:
-        path = Path(trident_job_dir) / "contours_geojson" / f"{wsi_path.stem}.geojson"
+        path = trident_job_dir / "contours_geojson" / f"{slide_id}.geojson"
     else:
-        raise SystemExit("Provide --geojson or --trident-job-dir.")
+        raise SystemExit("Provide --geojson, --contour, or --trident-job-dir.")
 
     if not path.is_file():
         raise SystemExit(f"GeoJSON not found: {path}")
-    return path
+    return path.resolve()
 
 
 def iter_polygon_rings(geometry: dict) -> Iterable[PolygonRings]:
@@ -337,10 +460,10 @@ def main() -> int:
     if args.max_items is not None and args.max_items < 1:
         raise SystemExit("--max-items must be >= 1")
 
-    wsi_path = Path(args.wsi)
-    if not wsi_path.is_file():
-        raise SystemExit(f"WSI not found: {wsi_path}")
-    geojson_path = resolve_geojson(wsi_path, args.geojson, args.trident_job_dir)
+    slide_id = infer_slide_id(args)
+    trident_job_dir = infer_trident_job_dir(args.contour, args.trident_job_dir)
+    geojson_path = resolve_geojson(slide_id, args.geojson, args.contour, trident_job_dir)
+    wsi_path, wsi_manifest = resolve_wsi(args, slide_id)
 
     case_id = args.case_id or wsi_path.stem
     run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -434,7 +557,10 @@ def main() -> int:
             "source": "trident_geojson",
             "created_at": datetime.now().isoformat(),
             "wsi_path": str(wsi_path),
+            "wsi_manifest": str(wsi_manifest) if wsi_manifest else None,
             "geojson_path": str(geojson_path),
+            "contour_path": str(Path(args.contour).resolve()) if args.contour else None,
+            "slide_id": slide_id,
             "case_id": case_id,
             "run_id": run_id,
             "output_root": str(args.output_root),

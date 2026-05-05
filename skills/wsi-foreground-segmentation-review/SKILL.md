@@ -61,15 +61,25 @@ Key TRIDENT outputs:
 - `contours/<slide>.jpg`: segmentation QC thumbnail.
 - `20x_512px_0px_overlap/patches/<slide>_patches.h5`: foreground coordinates in level-0 `(x, y)`.
 
-For reviewer QC, convert one slide's TRIDENT GeoJSON into this repo's Stage3-compatible review layout:
+For reviewer QC, convert one slide's TRIDENT contours into this repo's
+Stage3-compatible review layout. If the user says "review this segmentation"
+and provides a path under `trident_output_*/contours/*.jpg` or
+`trident_output_*/contours_geojson/*.geojson`, recognize it as a TRIDENT
+contour output and use `scripts/export_trident_reviewer_inputs.py`.
+
+If the user provides only a contour JPG path, pass it as `--contour`; the
+exporter infers the sibling GeoJSON path. If the user provides only a GeoJSON
+path, pass it as `--geojson`. If no `--wsi` is supplied, the exporter resolves
+the `anon_<uuid>.svs` slide through known local manifests, especially
+`/data2/vj724/wsi-agents/all_svs_fpaths.csv`, then loads the WSI through
+`utils.wsi_backend`.
 
 ```bash
 cd /data2/vj724/vlm-wsi-auto-context
 conda activate path-agent
 
 python scripts/export_trident_reviewer_inputs.py \
-  --wsi /path/to/wsis/slide.svs \
-  --trident-job-dir /path/to/trident_hest \
+  --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
   --output-root runs/trident_reviewer_inputs \
   --max-dim 2048 \
   --padding-frac 0.08
@@ -93,6 +103,12 @@ python run_vlm_reviewer_batch.py \
 ```
 
 If TRIDENT includes too much background, try `--seg_conf_thresh 0.4`, `--remove_artifacts`, or `grandqc`; if it misses tissue, compare `hest` vs `grandqc` and inspect `contours/*.jpg`.
+
+TRIDENT review building blocks:
+
+- A contour JPG is only a QC thumbnail; the reviewable segmentation is the matching GeoJSON.
+- The WSI pixels come from the source `.svs`, resolved by `anon_<uuid>.svs` through the WSI manifest.
+- The exporter reads each contour bbox from the WSI, rasterizes the GeoJSON polygon at crop resolution, writes `crop.png`, `mask.png`, `overlay.png`, and `metadata.json`, then the batch reviewer consumes that Stage3-compatible layout.
 
 ## Route 2: Repo VLM Foreground Pipeline
 
@@ -256,6 +272,12 @@ Natural-language call shape:
 
 ```text
 Use the wsi-foreground-segmentation-review skill to review the auto-context run at /data2/vj724/vlm-wsi-auto-context/runs/auto_context_pilot/he_patient_003_slide_003/he_p003_s003_icl0_20260430_175702. If bbox crops are not high-res, export Stage 7 high-res reviewer inputs. Run Gemini 3 Flash calibration review with reasoning effort high, QC thresholds 0.9/0.9, and summarize precision_pass, recall_pass, and overall_pass per bbox.
+```
+
+TRIDENT natural-language call shape:
+
+```text
+Use the wsi-foreground-segmentation-review skill to review this segmentation: /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg. Treat it as a TRIDENT contour output, infer the GeoJSON, resolve the source WSI from the anon slide manifest, export Stage3 reviewer inputs, then run Gemini 3 Flash calibration review with QC thresholds 0.9/0.9.
 ```
 
 Escalation policy:
