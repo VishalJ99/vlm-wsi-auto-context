@@ -21,7 +21,7 @@ There are three foreground/background routes:
 
 1. **TRIDENT route**: fastest classical/deep baseline with TRIDENT IO. Outputs GeoJSON foreground contours, contour thumbnails, and HDF5 foreground patch coordinates.
 2. **Repo VLM route**: this repo's staged auto-context method. Outputs per-bbox Stage 3 masks, Stage 6 VLM patch classifications, and Stage 7 postprocessed tissue masks.
-3. **Distilled route**: target fast route. Run bbox detection and context stages, then replace Stage 6 VLM patch classification with a trained lightweight FG/BG patch classifier. This repo did not contain that train/inference script when this skill was drafted or when rechecked on 2026-05-05; verify with `rg -i "distill|train|student|classifier"` before advertising it as runnable.
+3. **Distilled route**: target fast route. Run bbox detection and context stages, then replace Stage 6 VLM patch classification with a trained lightweight FG/BG patch classifier. MobileNetV3 student checkpoint artifacts exist outside this repo, but this repo did not contain the needed train/inference script when this skill was drafted or when rechecked on 2026-05-05; verify with `rg -i "distill|train|student|classifier"` before advertising it as runnable.
 
 Current PER-188 production target is a two-mode router, not TRIDENT-first:
 
@@ -283,6 +283,18 @@ useful teacher artifacts:
 - Stage 6 `patches.csv`: per-patch VLM labels and metadata.
 - Stage 6 `class_map.npy` / `quality_map.npy`: per-grid labels.
 - Stage 7 masks: postprocessed tissue masks.
+
+Copied student checkpoint artifacts are available outside this repo:
+
+- Shared staging root: `/vol/biomedic3/vj724/wsi-agents/distilled_student_models_20260225/`.
+- Mnemosyne-local exploration root: `/data2/vj724/wsi-agents/tmp/student_patch_distill_explore/`.
+- `train_zero_shot_t10k_e2_mnet_20260225/mobilenetv3_large_100_best.pt`, SHA-256 `ee83e44fe3f612105fa22f6cd8f29fc5cba5d2fed3037ed14b24d1ab9b7ab7e4`.
+- `harder_qwen8bfew_t10k_e2_mnet_20260225_split22_3_7/mobilenetv3_large_100_best.pt`, SHA-256 `907cf16a2cf674f95edcdfec279d7cbcce35ec3c6332c4000d7a442dae939502`.
+
+See `DATA.md` and `docs/data/distilled_student_models_20260225.md` for
+artifact details. These weights plus `results.json` files are candidate model
+artifacts; they do not make the distilled route runnable until an adapter loads
+them and writes the Stage 6 output contract.
 
 Do not claim distilled inference is implemented until the repo has at least:
 

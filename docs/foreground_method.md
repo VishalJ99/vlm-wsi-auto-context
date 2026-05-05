@@ -31,7 +31,10 @@ modes once a runnable distilled classifier exists:
    inputs, fall back to `run_auto_context.py` with `--stage6-icl-k 1` and
    `--stage2-force-read-l0`.
 
-This repo currently has teacher outputs that are useful for distillation, but no
+MobileNetV3 student checkpoint artifacts are available outside this repo under
+`/vol/biomedic3/vj724/wsi-agents/distilled_student_models_20260225/` and
+`/data2/vj724/wsi-agents/tmp/student_patch_distill_explore/`; see
+`docs/data/distilled_student_models_20260225.md`. This repo still has no
 checked-in distilled dataset exporter, trainer, or Stage6-compatible inference
 runner. Verify that those scripts exist before treating the distilled route as
 runnable.

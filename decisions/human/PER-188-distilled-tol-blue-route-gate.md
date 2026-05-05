@@ -38,6 +38,9 @@ available foreground/background reasoning path when the fast route fails.
   once the required distilled scripts exist.
 - The skill must not present distilled execution as runnable until the repo has
   a dataset exporter, trainer, and Stage6-compatible inference runner.
+- The copied MobileNetV3 student checkpoints are valid candidate artifacts for
+  this route, but weights alone are not a runnable foreground pipeline in this
+  repo.
 - Reviewer QC should happen before treating downstream linear-probe performance
   as evidence that foreground segmentation is good enough.
 - TRIDENT remains useful as a cheap external baseline and review target, but it
