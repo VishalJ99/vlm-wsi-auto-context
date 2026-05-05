@@ -10,6 +10,7 @@ Use this skill for repeat histopathology foreground/background work: segment tis
 ## First Checks
 
 - Start in `/data2/vj724/vlm-wsi-auto-context` unless the user specifies another checkout.
+- Use the `path-agent` conda environment for this repo's scripts, including `run_auto_context.py`, `scripts/export_auto_context_reviewer_inputs.py`, `scripts/export_trident_reviewer_inputs.py`, `run_vlm_reviewer_batch.py`, and `vlm_reviewer.py`.
 - Read `README.md`, `docs/foreground_method.md`, `docs/stage_outputs.md`, and `docs/reviewer.md` when commands or output paths matter.
 - Check git/DVC/Linear per project instructions before edits or artifact-producing runs.
 - Treat review outputs, exported masks, trained models, and generated datasets as persistent artifacts: write `reproduction.txt` next to output roots and track with DVC where the repo uses DVC.
@@ -83,10 +84,12 @@ python run_vlm_reviewer_batch.py \
   --output-root runs/reviewer \
   --batch-name trident_hest_review_v1 \
   --prompt-file prompts/calibration_reviewer.txt \
-  --model gemini-3-pro-preview \
-  --gemini-use-vertex \
-  --thinking-level High \
-  --temperature 0.0
+  --backend openrouter \
+  --model google/gemini-3-flash-preview \
+  --reasoning-effort high \
+  --temperature 0.0 \
+  --qc-precision-threshold 0.9 \
+  --qc-recall-threshold 0.9
 ```
 
 If TRIDENT includes too much background, try `--seg_conf_thresh 0.4`, `--remove_artifacts`, or `grandqc`; if it misses tissue, compare `hest` vs `grandqc` and inspect `contours/*.jpg`.
@@ -161,15 +164,27 @@ python run_vlm_reviewer_batch.py \
   --output-root runs/reviewer \
   --batch-name foreground_review_v1 \
   --prompt-file prompts/calibration_reviewer.txt \
-  --model gemini-3-pro-preview \
-  --gemini-use-vertex \
-  --thinking-level High \
-  --temperature 0.0
+  --backend openrouter \
+  --model google/gemini-3-flash-preview \
+  --reasoning-effort high \
+  --temperature 0.0 \
+  --qc-precision-threshold 0.9 \
+  --qc-recall-threshold 0.9
 ```
 
-If the run used `--stage6-icl-k 0` and did not use `--stage2-force-read-l0`,
+When the user asks in natural language to review an auto-context pipeline output
+directory, use the auto-context run directory as the input. A suitable input is
+the directory that contains `stage7/tissue_mask_post.npy`, `stage1/`, and
+`bboxes/`, for example:
+
+```text
+/data2/vj724/vlm-wsi-auto-context/runs/auto_context_pilot/he_patient_003_slide_003/he_p003_s003_icl0_20260430_175702
+```
+
+If the run used `--stage6-icl-k 0`, did not use `--stage2-force-read-l0`, or
+the existing `bboxes/*/stage3/crop.png` images are visibly thumbnail-derived,
 export high-resolution reviewer inputs from the final Stage 7 masks before
-reviewing. This avoids sending thumbnail-derived Stage 3 crops to the reviewer:
+reviewing. This avoids sending blurry Stage 3 crops to the reviewer:
 
 ```bash
 python scripts/export_auto_context_reviewer_inputs.py \
@@ -186,8 +201,17 @@ python run_vlm_reviewer_batch.py \
   --prompt-file prompts/calibration_reviewer.txt \
   --backend openrouter \
   --model google/gemini-3-flash-preview \
-  --max-concurrent-requests 2
+  --reasoning-effort high \
+  --max-concurrent-requests 2 \
+  --qc-precision-threshold 0.9 \
+  --qc-recall-threshold 0.9
 ```
+
+If a run already used `--stage2-force-read-l0` and the saved Stage 3 bbox crops
+are high-resolution enough for visual review, skip the exporter and point
+`--baseline-dir` at the run root's parent or existing review-compatible baseline
+root. The reviewer batch discovers Stage3-compatible bbox inputs under
+`<baseline>/<case>/<run_id>/bboxes/<bbox_id>/stage3/`.
 
 Batch reviewer discovers:
 
@@ -218,6 +242,21 @@ The likely clean integration is: keep Stage 1 bbox detection, optional Stage 3 g
 A separate review skill is usually unnecessary: review is just a VLM call over a source crop plus a mask or overlay, using the prompt files in `prompts/`. Keep it in this skill unless users start asking for review-only workflows independent of foreground segmentation.
 
 Use `prompts/calibration_reviewer.txt` for numeric precision/recall calibration and sortable QC. Use `prompts/subjective_reviewer.txt` for narrative expert judgment. Treat `prompts/objective_reviewer.txt` as a legacy prompt that should not be used for foreground review unless explicitly comparing old runs.
+
+Default QC policy:
+
+- Use OpenRouter `google/gemini-3-flash-preview` with reasoning effort `high`.
+- Use `prompts/calibration_reviewer.txt` unless the user explicitly asks for a narrative subjective review.
+- `precision_pass = precision > --qc-precision-threshold`.
+- `recall_pass = recall > --qc-recall-threshold`.
+- `overall_pass = precision_pass and recall_pass`.
+- Default thresholds are `0.9` and `0.9`, but always expose them as args so they can be tuned as manual labels accumulate.
+
+Natural-language call shape:
+
+```text
+Use the wsi-foreground-segmentation-review skill to review the auto-context run at /data2/vj724/vlm-wsi-auto-context/runs/auto_context_pilot/he_patient_003_slide_003/he_p003_s003_icl0_20260430_175702. If bbox crops are not high-res, export Stage 7 high-res reviewer inputs. Run Gemini 3 Flash calibration review with reasoning effort high, QC thresholds 0.9/0.9, and summarize precision_pass, recall_pass, and overall_pass per bbox.
+```
 
 Escalation policy:
 

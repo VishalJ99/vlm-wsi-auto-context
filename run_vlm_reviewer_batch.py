@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from PIL import Image
 
 from utils.model_pricing import estimate_review_cost_usd
+from utils.reviewer_qc import build_qc_result
 from vlm_reviewer import (
     DEFAULT_OPENROUTER_REFERER,
     DEFAULT_OPENROUTER_URL,
@@ -43,7 +44,9 @@ RATE_LIMIT_HINTS = (
     "too many requests",
 )
 DEFAULT_PROMPT_FILE = "prompts/calibration_reviewer.txt"
-DEFAULT_MODEL = "gemini-3-pro-preview"
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_BACKEND = "openrouter"
+DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_OUTPUT_ROOT = "auto_reviews_batch"
 DEFAULT_BASELINE_DIR = "baseline"
 
@@ -410,6 +413,11 @@ def build_item_metadata(
 ) -> Dict[str, Any]:
     usage = response.get("usage") or {}
     cost_estimate = estimate_review_cost_usd(args.model, usage)
+    qc = build_qc_result(
+        parsed_json=parsed_json,
+        precision_threshold=args.qc_precision_threshold,
+        recall_threshold=args.qc_recall_threshold,
+    )
     return {
         "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         "status": status,
@@ -454,6 +462,7 @@ def build_item_metadata(
         "finish_reason": response.get("finish_reason"),
         "cost_estimate_usd": cost_estimate,
         "parsed_json": parsed_json,
+        "qc": qc,
         "thoughts": response.get("thoughts") or [],
         "git_commit_hash": get_git_commit_hash(),
         "cwd": os.getcwd(),
@@ -535,6 +544,7 @@ def run_task(
         "metadata_path": str(meta_out),
         "usage": response.get("usage") or {},
         "cost_estimate_usd": metadata.get("cost_estimate_usd"),
+        "qc": metadata.get("qc"),
     }
 
 
@@ -569,6 +579,14 @@ def write_results_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         "estimated_input_cost_usd",
         "estimated_output_cost_usd",
         "estimated_total_cost_usd",
+        "qc_precision",
+        "qc_recall",
+        "qc_precision_pass",
+        "qc_recall_pass",
+        "qc_overall_pass",
+        "qc_precision_threshold",
+        "qc_recall_threshold",
+        "qc_reason",
         "finish_reason",
         "error",
         "output_dir",
@@ -580,6 +598,8 @@ def write_results_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         for row in rows:
             usage = row.get("usage") or {}
             cost = row.get("cost_estimate_usd") or {}
+            qc = row.get("qc") or {}
+            thresholds = qc.get("thresholds") or {}
             writer.writerow(
                 {
                     "case_id": row.get("case_id"),
@@ -599,6 +619,14 @@ def write_results_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
                     "estimated_input_cost_usd": cost.get("estimated_input_cost_usd"),
                     "estimated_output_cost_usd": cost.get("estimated_output_cost_usd"),
                     "estimated_total_cost_usd": cost.get("estimated_total_cost_usd"),
+                    "qc_precision": qc.get("precision"),
+                    "qc_recall": qc.get("recall"),
+                    "qc_precision_pass": qc.get("precision_pass"),
+                    "qc_recall_pass": qc.get("recall_pass"),
+                    "qc_overall_pass": qc.get("overall_pass"),
+                    "qc_precision_threshold": thresholds.get("precision_threshold"),
+                    "qc_recall_threshold": thresholds.get("recall_threshold"),
+                    "qc_reason": qc.get("reason"),
                     "finish_reason": row.get("finish_reason"),
                     "error": row.get("error"),
                     "output_dir": row.get("output_dir"),
@@ -667,6 +695,18 @@ def parse_args() -> argparse.Namespace:
     review.add_argument("--overlay-alpha", type=float, default=0.5, help="Generated overlay alpha (default: 0.5)")
     review.add_argument("--mask-threshold", type=int, default=0, help="Mask threshold (mask > threshold, default: 0)")
     review.add_argument(
+        "--qc-precision-threshold",
+        type=float,
+        default=0.9,
+        help="Precision threshold for calibration QC pass; precision must be > this value (default: 0.9)",
+    )
+    review.add_argument(
+        "--qc-recall-threshold",
+        type=float,
+        default=0.9,
+        help="Recall threshold for calibration QC pass; recall must be > this value (default: 0.9)",
+    )
+    review.add_argument(
         "--max-concurrent-requests",
         type=int,
         default=4,
@@ -677,8 +717,8 @@ def parse_args() -> argparse.Namespace:
     vlm.add_argument(
         "--backend",
         choices=["gemini", "openrouter", "vllm"],
-        default="gemini",
-        help="Inference backend (default: gemini).",
+        default=DEFAULT_BACKEND,
+        help=f"Inference backend (default: {DEFAULT_BACKEND}).",
     )
     vlm.add_argument("--model", default=DEFAULT_MODEL, help=f"Model ID (default: {DEFAULT_MODEL})")
     vlm.add_argument("--thinking-level", default="High", help="Thinking level (default: High)")
@@ -707,13 +747,21 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OPENROUTER_REFERER,
         help=f"OpenRouter referer header (default: {DEFAULT_OPENROUTER_REFERER})",
     )
-    vlm.add_argument("--reasoning-effort", default=None, help="OpenRouter reasoning effort")
+    vlm.add_argument(
+        "--reasoning-effort",
+        default=DEFAULT_REASONING_EFFORT,
+        help=f"OpenRouter reasoning effort (default: {DEFAULT_REASONING_EFFORT})",
+    )
     vlm.add_argument("--vllm-url", default=DEFAULT_VLLM_URL, help=f"vLLM URL (default: {DEFAULT_VLLM_URL})")
     parser.set_defaults(gemini_use_vertex=True)
 
     args = parser.parse_args()
     if args.overlay_alpha < 0.0 or args.overlay_alpha > 1.0:
         raise ValueError("--overlay-alpha must be in [0, 1]")
+    if args.qc_precision_threshold < 0.0 or args.qc_precision_threshold > 1.0:
+        raise ValueError("--qc-precision-threshold must be in [0, 1]")
+    if args.qc_recall_threshold < 0.0 or args.qc_recall_threshold > 1.0:
+        raise ValueError("--qc-recall-threshold must be in [0, 1]")
     if args.max_concurrent_requests < 1:
         raise ValueError("--max-concurrent-requests must be >= 1")
     if args.progress_every < 1:
@@ -785,7 +833,10 @@ def main() -> int:
     print(f"Backend:              {args.backend}")
     print(f"Model:                {args.model}")
     print(f"Thinking level:       {args.thinking_level}")
+    print(f"Reasoning effort:     {args.reasoning_effort}")
     print(f"Include thoughts:     {args.include_thoughts}")
+    print(f"QC precision pass:    > {args.qc_precision_threshold}")
+    print(f"QC recall pass:       > {args.qc_recall_threshold}")
     print()
 
     if not scheduled:
@@ -930,7 +981,21 @@ def main() -> int:
     latencies = sorted([float(r.get("elapsed_seconds", 0.0)) for r in completed_rows])
     estimated_total_cost_usd = 0.0
     estimated_cost_count = 0
+    qc_overall_pass_count = 0
+    qc_precision_pass_count = 0
+    qc_recall_pass_count = 0
+    qc_unavailable_count = 0
     for row in completed_rows:
+        qc = row.get("qc") or {}
+        if qc.get("overall_pass") is True:
+            qc_overall_pass_count += 1
+        if qc.get("precision_pass") is True:
+            qc_precision_pass_count += 1
+        if qc.get("recall_pass") is True:
+            qc_recall_pass_count += 1
+        if qc.get("overall_pass") is None:
+            qc_unavailable_count += 1
+
         cost = row.get("cost_estimate_usd") or {}
         total_cost = cost.get("estimated_total_cost_usd")
         if total_cost is None:
@@ -953,6 +1018,15 @@ def main() -> int:
         "openrouter_retry_count": len(retry_rows),
         "rate_limited_count": sum(1 for r in completed_rows if r.get("rate_limited")),
         "parsed_json_count": sum(1 for r in completed_rows if r.get("json_parsed")),
+        "qc_thresholds": {
+            "precision_threshold": float(args.qc_precision_threshold),
+            "recall_threshold": float(args.qc_recall_threshold),
+            "comparison": "gt",
+        },
+        "qc_precision_pass_count": qc_precision_pass_count,
+        "qc_recall_pass_count": qc_recall_pass_count,
+        "qc_overall_pass_count": qc_overall_pass_count,
+        "qc_unavailable_count": qc_unavailable_count,
         "elapsed_seconds_total": elapsed_total,
         "throughput_req_per_sec": len(completed_rows) / elapsed_total,
         "latency_seconds_p50": percentile(latencies, 0.50),
@@ -974,6 +1048,10 @@ def main() -> int:
     print(f"OpenRouter retries:   {summary['openrouter_retry_count']}")
     print(f"Rate-limited:         {summary['rate_limited_count']}")
     print(f"Parsed JSON:          {summary['parsed_json_count']}")
+    print(f"QC precision pass:    {summary['qc_precision_pass_count']}")
+    print(f"QC recall pass:       {summary['qc_recall_pass_count']}")
+    print(f"QC overall pass:      {summary['qc_overall_pass_count']}")
+    print(f"QC unavailable:       {summary['qc_unavailable_count']}")
     print(f"Elapsed (s):          {summary['elapsed_seconds_total']:.2f}")
     print(f"Throughput (req/s):   {summary['throughput_req_per_sec']:.2f}")
     print(f"Latency p50/p90/p95:  {summary['latency_seconds_p50']:.2f}/"

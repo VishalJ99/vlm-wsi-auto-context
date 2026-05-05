@@ -5,6 +5,8 @@ Canonical reviewer entrypoints:
 - Batch: `run_vlm_reviewer_batch.py`
 - Single item: `vlm_reviewer.py`
 
+Run these commands in the `path-agent` conda environment for this repo.
+
 ## Batch Workflow
 
 1. Run foreground method first.
@@ -17,8 +19,17 @@ Example:
 python run_vlm_reviewer_batch.py \
   --baseline-dir runs/paper_foreground \
   --output-root runs/paper_reviewer \
-  --batch-name paper_reviewer_v1
+  --batch-name paper_reviewer_v1 \
+  --qc-precision-threshold 0.9 \
+  --qc-recall-threshold 0.9
 ```
+
+Default batch/single-item review uses OpenRouter
+`google/gemini-3-flash-preview`, `prompts/calibration_reviewer.txt`,
+OpenRouter reasoning effort `high`, temperature `0.0`, and strict thresholding:
+`precision_pass = precision > --qc-precision-threshold`,
+`recall_pass = recall > --qc-recall-threshold`, and
+`overall_pass = precision_pass and recall_pass`.
 
 ## TRIDENT / External Mask Workflow
 
@@ -39,7 +50,9 @@ python run_vlm_reviewer_batch.py \
   --baseline-dir runs/trident_reviewer_inputs \
   --run-selection latest \
   --output-root runs/paper_reviewer \
-  --batch-name trident_reviewer_v1
+  --batch-name trident_reviewer_v1 \
+  --qc-precision-threshold 0.9 \
+  --qc-recall-threshold 0.9
 ```
 
 ## Single-Item Workflow
@@ -48,7 +61,9 @@ python run_vlm_reviewer_batch.py \
 python vlm_reviewer.py \
   --crop /path/to/crop.png \
   --mask /path/to/mask.png \
-  --overlay /path/to/overlay.png
+  --overlay /path/to/overlay.png \
+  --qc-precision-threshold 0.9 \
+  --qc-recall-threshold 0.9
 ```
 
 ## Auto-Context Stage 7 High-Resolution Bbox Workflow
@@ -85,8 +100,20 @@ python run_vlm_reviewer_batch.py \
   --prompt-file prompts/calibration_reviewer.txt \
   --backend openrouter \
   --model google/gemini-3-flash-preview \
-  --max-concurrent-requests 2
+  --reasoning-effort high \
+  --max-concurrent-requests 2 \
+  --qc-precision-threshold 0.9 \
+  --qc-recall-threshold 0.9
 ```
+
+When the user gives a natural-language request like "review the auto-context
+run at `<run-dir>`", treat `<run-dir>` as the run directory containing
+`stage7/tissue_mask_post.npy` and `bboxes/*`. If existing
+`bboxes/*/stage3/crop.png` files are known to be high-resolution because the
+run used `--stage2-force-read-l0` and they are visually sufficient, review the
+run root directly. Otherwise export Stage 7 high-resolution reviewer inputs
+with `scripts/export_auto_context_reviewer_inputs.py` and review the exported
+`runs/auto_context_reviewer_inputs` root.
 
 ## Output Schema (Batch)
 
@@ -97,9 +124,16 @@ python run_vlm_reviewer_batch.py \
 - `reviewer_decision`
 - `confidence`
 - `reasoning`
+- `qc.precision`
+- `qc.recall`
+- `qc.precision_pass`
+- `qc.recall_pass`
+- `qc.overall_pass`
 - file references used for review input
 
-`results.csv` contains the same decision payload in tabular form for sorting/filtering.
+`results.csv` contains the same decision payload in tabular form for
+sorting/filtering, including `qc_precision_pass`, `qc_recall_pass`, and
+`qc_overall_pass`.
 
 ## Prompt Files
 

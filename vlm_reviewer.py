@@ -26,10 +26,13 @@ from run_vlm_bbox_inference import (
     encode_image_base64,
 )
 from utils.model_pricing import estimate_review_cost_usd
+from utils.reviewer_qc import build_qc_result
 
 
 DEFAULT_PROMPT_FILE = "prompts/calibration_reviewer.txt"
-DEFAULT_MODEL = "gemini-3-pro-preview"
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_BACKEND = "openrouter"
+DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_OUTPUT_ROOT = "auto_reviews"
 
 
@@ -167,6 +170,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Root output directory for persisted reviews (default: {DEFAULT_OUTPUT_ROOT}).",
     )
     io.add_argument(
+        "--qc-precision-threshold",
+        type=float,
+        default=0.9,
+        help="Precision threshold for calibration QC pass; precision must be > this value (default: 0.9).",
+    )
+    io.add_argument(
+        "--qc-recall-threshold",
+        type=float,
+        default=0.9,
+        help="Recall threshold for calibration QC pass; recall must be > this value (default: 0.9).",
+    )
+    io.add_argument(
         "--case-name",
         default=None,
         help="Optional case name override for output path.",
@@ -189,8 +204,8 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument(
         "--backend",
         choices=["gemini", "openrouter", "vllm"],
-        default="gemini",
-        help="Inference backend (default: gemini).",
+        default=DEFAULT_BACKEND,
+        help=f"Inference backend (default: {DEFAULT_BACKEND}).",
     )
     backend.add_argument("--model", default=DEFAULT_MODEL, help=f"Model ID (default: {DEFAULT_MODEL}).")
     backend.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (default: 0.0).")
@@ -231,8 +246,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     openrouter.add_argument(
         "--reasoning-effort",
-        default=None,
-        help="OpenRouter reasoning effort: low/medium/high (backend=openrouter).",
+        default=DEFAULT_REASONING_EFFORT,
+        help=f"OpenRouter reasoning effort: low/medium/high (default: {DEFAULT_REASONING_EFFORT}).",
     )
 
     vllm = parser.add_argument_group("vLLM")
@@ -248,6 +263,10 @@ def main() -> None:
 
     if args.overlay_alpha < 0.0 or args.overlay_alpha > 1.0:
         raise ValueError("--overlay-alpha must be in [0, 1].")
+    if args.qc_precision_threshold < 0.0 or args.qc_precision_threshold > 1.0:
+        raise ValueError("--qc-precision-threshold must be in [0, 1].")
+    if args.qc_recall_threshold < 0.0 or args.qc_recall_threshold > 1.0:
+        raise ValueError("--qc-recall-threshold must be in [0, 1].")
 
     if not args.overlay and not args.mask:
         raise ValueError("Provide either --overlay or --mask.")
@@ -319,6 +338,7 @@ def main() -> None:
     print(f"backend: {args.backend}")
     print(f"model:   {args.model}")
     print(f"thinking_level: {args.thinking_level}")
+    print(f"reasoning_effort: {args.reasoning_effort}")
     print(f"include_thoughts: {args.include_thoughts}")
     print()
 
@@ -350,6 +370,11 @@ def main() -> None:
     error = result.get("error")
     attempts = result.get("attempts")
     parsed = parse_json_response(text)
+    qc = build_qc_result(
+        parsed_json=parsed,
+        precision_threshold=args.qc_precision_threshold,
+        recall_threshold=args.qc_recall_threshold,
+    )
     cost_estimate = estimate_review_cost_usd(args.model, usage)
 
     inferred_case, inferred_bbox = infer_case_and_bbox(args.crop, args.mask, args.overlay)
@@ -407,6 +432,7 @@ def main() -> None:
         "usage": usage,
         "cost_estimate_usd": cost_estimate,
         "parsed_json": parsed,
+        "qc": qc,
         "thoughts": thoughts,
         "git_commit_hash": get_git_commit_hash(),
         "cwd": os.getcwd(),
@@ -428,6 +454,15 @@ def main() -> None:
     else:
         print("Parsed JSON: unavailable")
         print()
+
+    print("=" * 60)
+    print("=== QC THRESHOLDS ===")
+    print("=" * 60)
+    print(f"  Precision pass: {qc['precision_pass']} (precision={qc['precision']}, threshold>{args.qc_precision_threshold})")
+    print(f"  Recall pass:    {qc['recall_pass']} (recall={qc['recall']}, threshold>{args.qc_recall_threshold})")
+    print(f"  Overall pass:   {qc['overall_pass']}")
+    print(f"  Reason:         {qc['reason']}")
+    print()
 
     if thoughts:
         print("=" * 60)
