@@ -61,18 +61,15 @@ Key TRIDENT outputs:
 - `contours/<slide>.jpg`: segmentation QC thumbnail.
 - `20x_512px_0px_overlap/patches/<slide>_patches.h5`: foreground coordinates in level-0 `(x, y)`.
 
-For reviewer QC, convert one slide's TRIDENT contours into this repo's
-Stage3-compatible review layout. If the user says "review this segmentation"
-and provides a path under `trident_output_*/contours/*.jpg` or
-`trident_output_*/contours_geojson/*.geojson`, recognize it as a TRIDENT
-contour output and use `scripts/export_trident_reviewer_inputs.py`.
+For reviewer QC, the review unit should be each VLM-detected tissue core, not
+each TRIDENT contour feature. If the user says "review this segmentation" and
+provides a path under `trident_output_*/contours/*.jpg` or
+`trident_output_*/contours_geojson/*.geojson`, recognize it as a TRIDENT output:
+resolve the source WSI, run or reuse this repo's Stage 1 VLM bbox detector, then
+rasterize TRIDENT's WSI-level GeoJSON contours into each Stage 1 bbox.
 
-If the user provides only a contour JPG path, pass it as `--contour`; the
-exporter infers the sibling GeoJSON path. If the user provides only a GeoJSON
-path, pass it as `--geojson`. If no `--wsi` is supplied, the exporter resolves
-the `anon_<uuid>.svs` slide through known local manifests, especially
-`/data2/vj724/wsi-agents/all_svs_fpaths.csv`, then loads the WSI through
-`utils.wsi_backend`.
+If only a contour JPG path is provided, first resolve the sibling GeoJSON and
+source WSI without exporting crops:
 
 ```bash
 cd /data2/vj724/vlm-wsi-auto-context
@@ -80,6 +77,28 @@ conda activate path-agent
 
 python scripts/export_trident_reviewer_inputs.py \
   --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
+  --resolve-only
+```
+
+Run Stage 1 with the existing OpenRouter VLM bbox script, same as the current
+foreground pipeline. Use the resolved WSI path from `--resolve-only`:
+
+```bash
+python detect_foreground_regions_from_wsi_thumbnail.py \
+  --wsi /resolved/source_slide.svs \
+  --backend openrouter \
+  --model google/gemini-3-flash-preview \
+  --rotations 0 90 180 270 \
+  --wsi-reader auto
+```
+
+Then export per-core reviewer inputs by passing the Stage 1 output directory
+or its `bboxes.json`:
+
+```bash
+python scripts/export_trident_reviewer_inputs.py \
+  --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
+  --stage1-run-dir stage1_output/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64/google_gemini_3_flash_preview/<timestamp> \
   --output-root runs/trident_reviewer_inputs \
   --max-dim 2048 \
   --padding-frac 0.08
@@ -108,7 +127,9 @@ TRIDENT review building blocks:
 
 - A contour JPG is only a QC thumbnail; the reviewable segmentation is the matching GeoJSON.
 - The WSI pixels come from the source `.svs`, resolved by `anon_<uuid>.svs` through the WSI manifest.
-- The exporter reads each contour bbox from the WSI, rasterizes the GeoJSON polygon at crop resolution, writes `crop.png`, `mask.png`, `overlay.png`, and `metadata.json`, then the batch reviewer consumes that Stage3-compatible layout.
+- Tissue-core bboxes come from the existing VLM Stage 1 detector routed through OpenRouter.
+- The exporter reads each Stage 1 bbox from the WSI, rasterizes all intersecting TRIDENT GeoJSON polygons at crop resolution, writes `crop.png`, `mask.png`, `overlay.png`, and `metadata.json`, then the batch reviewer consumes that Stage3-compatible layout.
+- If Stage 1 bboxes are omitted, the exporter falls back to per-contour-feature crops; use that only for debugging, not routine per-core QC.
 
 ## Route 2: Repo VLM Foreground Pipeline
 
@@ -277,7 +298,7 @@ Use the wsi-foreground-segmentation-review skill to review the auto-context run 
 TRIDENT natural-language call shape:
 
 ```text
-Use the wsi-foreground-segmentation-review skill to review this segmentation: /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg. Treat it as a TRIDENT contour output, infer the GeoJSON, resolve the source WSI from the anon slide manifest, export Stage3 reviewer inputs, then run Gemini 3 Flash calibration review with QC thresholds 0.9/0.9.
+Use the wsi-foreground-segmentation-review skill to review this segmentation: /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg. Treat it as a TRIDENT contour output, infer the GeoJSON, resolve the source WSI from the anon slide manifest, run or reuse OpenRouter Stage 1 VLM bbox detection for tissue cores, export per-core Stage3 reviewer inputs by rasterizing TRIDENT contours into those bboxes, then run Gemini 3 Flash calibration review with QC thresholds 0.9/0.9.
 ```
 
 Escalation policy:

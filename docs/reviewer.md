@@ -36,17 +36,41 @@ OpenRouter reasoning effort `high`, temperature `0.0`, and strict thresholding:
 TRIDENT emits contour JPGs and GeoJSON contours, not this repo's Stage 3
 crop/mask layout. If the user gives a TRIDENT contour path, infer the
 corresponding `contours_geojson/<slide>.geojson`, resolve the source WSI from
-the anonymous slide ID, then export TRIDENT contours first:
+the anonymous slide ID, then use this repo's Stage 1 VLM bbox detector to
+identify tissue cores. The Stage 1 VLM route is the same OpenRouter route used
+by the foreground pipeline:
 
 ```bash
 python scripts/export_trident_reviewer_inputs.py \
   --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
+  --resolve-only
+```
+
+```bash
+python detect_foreground_regions_from_wsi_thumbnail.py \
+  --wsi /resolved/source_slide.svs \
+  --backend openrouter \
+  --model google/gemini-3-flash-preview \
+  --rotations 0 90 180 270 \
+  --wsi-reader auto
+```
+
+This writes `stage1_output/<slide>/<model>/<timestamp>/bboxes.json`.
+Rasterize the WSI-level TRIDENT contours into each Stage 1 tissue-core bbox:
+
+```bash
+python scripts/export_trident_reviewer_inputs.py \
+  --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
+  --stage1-run-dir stage1_output/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64/google_gemini_3_flash_preview/<timestamp> \
   --output-root runs/trident_reviewer_inputs
 ```
 
-The exporter also accepts `--geojson`, `--trident-job-dir`, and explicit
-`--wsi`. If `--wsi` is omitted, it resolves `anon_<uuid>.svs` via known local
-WSI manifests, including `/data2/vj724/wsi-agents/all_svs_fpaths.csv`.
+The exporter also accepts `--stage1-bboxes-json`, `--geojson`,
+`--trident-job-dir`, and explicit `--wsi`. If `--wsi` is omitted, it resolves
+`anon_<uuid>.svs` via known local WSI manifests, including
+`/data2/vj724/wsi-agents/all_svs_fpaths.csv`. If Stage 1 bboxes are omitted,
+the exporter falls back to legacy per-contour-feature crops, which is usually
+not the right unit for tissue-core review.
 
 Then review the exported inputs:
 

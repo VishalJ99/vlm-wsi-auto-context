@@ -138,6 +138,16 @@ Key files:
 ## TRIDENT Reviewer Input Export
 Script: `scripts/export_trident_reviewer_inputs.py`
 
+Preferred review unit:
+- Stage 1 VLM bbox from `detect_foreground_regions_from_wsi_thumbnail.py` or
+  `run_auto_context.py`, passed via `--stage1-run-dir` or
+  `--stage1-bboxes-json`. TRIDENT GeoJSON contours are rasterized into each
+  bbox to create per-core reviewer inputs.
+
+Fallback review unit:
+- TRIDENT contour feature when no Stage 1 bbox file is supplied. This is useful
+  for exporter debugging, but is not the standard tissue-core review route.
+
 Output root:
 
 ```text

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ABOUTME: Export TRIDENT GeoJSON tissue contours as Stage3-style reviewer inputs.
-# ABOUTME: Writes per-contour crop, mask, overlay, and metadata for VLM reviewer QC.
+# ABOUTME: Uses VLM Stage 1 bboxes as per-core review units when supplied.
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import re
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -35,6 +36,16 @@ Point = Tuple[float, float]
 Ring = List[Point]
 PolygonRings = List[Ring]
 BBox = Tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class TridentPolygon:
+    feature_index: int
+    properties: dict
+    polygons: PolygonRings
+    bbox_level0: BBox
+
+
 DEFAULT_WSI_MANIFESTS = [
     Path("/data2/vj724/wsi-agents/all_svs_fpaths.csv"),
     Path("/data2/vj724/benchmark_label_image_ocr/svs_file_paths.txt"),
@@ -91,9 +102,39 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resolve-only",
+        action="store_true",
+        help="Print resolved WSI/GeoJSON paths as JSON and exit without exporting reviewer inputs.",
+    )
+    parser.add_argument(
         "--output-root",
         default="runs/trident_reviewer_inputs",
         help="Root for Stage3-compatible reviewer inputs.",
+    )
+    parser.add_argument(
+        "--stage1-run-dir",
+        default=None,
+        help=(
+            "Auto-context run dir containing stage1/bboxes.json, or a Stage 1 output dir "
+            "containing bboxes.json. When supplied, export one review item per Stage 1 bbox."
+        ),
+    )
+    parser.add_argument(
+        "--stage1-bboxes-json",
+        default=None,
+        help=(
+            "Direct path to a Stage 1 bboxes.json. When supplied, export one review item "
+            "per Stage 1 bbox."
+        ),
+    )
+    parser.add_argument(
+        "--review-unit",
+        choices=["auto", "stage1_bbox", "contour_feature"],
+        default="auto",
+        help=(
+            "Review item unit. auto uses stage1_bbox when Stage 1 bboxes are supplied, "
+            "otherwise contour_feature."
+        ),
     )
     parser.add_argument(
         "--case-id",
@@ -129,13 +170,22 @@ def parse_args() -> argparse.Namespace:
         "--min-bbox-area",
         type=float,
         default=1024.0,
-        help="Skip contours with unpadded level-0 bbox area below this many pixels.",
+        help="Skip TRIDENT contours with unpadded level-0 bbox area below this many pixels.",
     )
     parser.add_argument(
         "--max-items",
         type=int,
         default=None,
-        help="Optional cap on exported contours after area filtering.",
+        help="Optional cap on exported review items after filtering.",
+    )
+    parser.add_argument(
+        "--bbox",
+        action="append",
+        default=None,
+        help=(
+            "Optional Stage 1 bbox ID to export when --review-unit stage1_bbox is used. "
+            "May be passed multiple times."
+        ),
     )
     parser.add_argument(
         "--overlay-alpha",
@@ -308,6 +358,17 @@ def polygon_bbox(polygons: Sequence[PolygonRings]) -> BBox:
     )
 
 
+def bbox_id_from_level0(bbox: Sequence[int]) -> str:
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    return f"{x1}_{y1}_{x2}_{y2}"
+
+
+def bbox_intersects(left: BBox, right: BBox) -> bool:
+    lx1, ly1, lx2, ly2 = left
+    rx1, ry1, rx2, ry2 = right
+    return lx1 < rx2 and lx2 > rx1 and ly1 < ry2 and ly2 > ry1
+
+
 def pad_bbox(bbox: BBox, padding_frac: float, wsi_w: int, wsi_h: int) -> BBox:
     x1, y1, x2, y2 = bbox
     width = max(1, x2 - x1)
@@ -413,6 +474,89 @@ def load_features(geojson_path: Path) -> List[dict]:
     return features
 
 
+def load_trident_polygons(
+    features: Sequence[dict],
+    wsi_w: int,
+    wsi_h: int,
+    min_bbox_area: float,
+) -> List[TridentPolygon]:
+    polygons_out: List[TridentPolygon] = []
+    for feature_idx, feature in enumerate(features):
+        geometry = feature.get("geometry") or {}
+        properties = feature.get("properties") or {}
+        for polygons in iter_polygon_rings(geometry):
+            if not polygons:
+                continue
+            raw_bbox = clamp_bbox(polygon_bbox([polygons]), wsi_w, wsi_h)
+            raw_area = float(max(1, raw_bbox[2] - raw_bbox[0]) * max(1, raw_bbox[3] - raw_bbox[1]))
+            if raw_area < min_bbox_area:
+                continue
+            polygons_out.append(
+                TridentPolygon(
+                    feature_index=feature_idx,
+                    properties=properties,
+                    polygons=polygons,
+                    bbox_level0=raw_bbox,
+                )
+            )
+    return polygons_out
+
+
+def resolve_stage1_bboxes_json(args: argparse.Namespace) -> Optional[Path]:
+    if args.stage1_bboxes_json:
+        path = Path(args.stage1_bboxes_json).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"Stage 1 bboxes JSON not found: {path}")
+        return path.resolve()
+
+    if not args.stage1_run_dir:
+        return None
+
+    run_dir = Path(args.stage1_run_dir).expanduser()
+    candidates = [
+        run_dir / "stage1" / "bboxes.json",
+        run_dir / "bboxes.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise SystemExit(
+        "Could not find Stage 1 bboxes JSON in --stage1-run-dir. "
+        f"Tried: {', '.join(str(p) for p in candidates)}"
+    )
+
+
+def load_stage1_bbox_items(
+    bboxes_json: Path,
+    requested: Optional[Sequence[str]],
+) -> List[Tuple[str, BBox, dict]]:
+    payload = json.loads(bboxes_json.read_text())
+    regions = payload.get("detected_regions", [])
+    if not isinstance(regions, list):
+        raise SystemExit(f"Malformed Stage 1 detected_regions in {bboxes_json}")
+
+    requested_set = set(requested or [])
+    items: List[Tuple[str, BBox, dict]] = []
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        bbox = region.get("bbox_level0")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        bbox_tuple = tuple(int(v) for v in bbox)
+        bbox_id = bbox_id_from_level0(bbox_tuple)
+        if requested_set and bbox_id not in requested_set:
+            continue
+        items.append((bbox_id, bbox_tuple, region))
+
+    if requested_set:
+        found = {bbox_id for bbox_id, _, _ in items}
+        missing = sorted(requested_set - found)
+        if missing:
+            raise SystemExit(f"Requested Stage 1 bbox ID(s) not found in {bboxes_json}: {missing}")
+    return items
+
+
 def safe_core_id(index: int, properties: dict, bbox: BBox) -> str:
     tissue_id = properties.get("tissue_id", index)
     tissue_id_safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(tissue_id)).strip("_") or str(index)
@@ -464,6 +608,27 @@ def main() -> int:
     trident_job_dir = infer_trident_job_dir(args.contour, args.trident_job_dir)
     geojson_path = resolve_geojson(slide_id, args.geojson, args.contour, trident_job_dir)
     wsi_path, wsi_manifest = resolve_wsi(args, slide_id)
+    if args.resolve_only:
+        print(
+            json.dumps(
+                {
+                    "slide_id": slide_id,
+                    "wsi_path": str(wsi_path),
+                    "wsi_manifest": str(wsi_manifest) if wsi_manifest else None,
+                    "geojson_path": str(geojson_path),
+                    "contour_path": str(Path(args.contour).resolve()) if args.contour else None,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    stage1_bboxes_json = resolve_stage1_bboxes_json(args)
+    review_unit = args.review_unit
+    if review_unit == "auto":
+        review_unit = "stage1_bbox" if stage1_bboxes_json is not None else "contour_feature"
+    if review_unit == "stage1_bbox" and stage1_bboxes_json is None:
+        raise SystemExit("--review-unit stage1_bbox requires --stage1-bboxes-json or --stage1-run-dir.")
 
     case_id = args.case_id or wsi_path.stem
     run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -478,93 +643,169 @@ def main() -> int:
         wsi_w, wsi_h = get_level0_dimensions(wsi, reader)
         pyramid = get_pyramid_info(wsi, reader)
         exported = 0
+        trident_polygons = load_trident_polygons(features, wsi_w, wsi_h, args.min_bbox_area)
 
-        for feature_idx, feature in enumerate(features):
-            geometry = feature.get("geometry") or {}
-            properties = feature.get("properties") or {}
-            polygons = list(iter_polygon_rings(geometry))
-            if not polygons:
-                continue
+        if review_unit == "stage1_bbox":
+            stage1_items = load_stage1_bbox_items(stage1_bboxes_json, args.bbox)
+            if not stage1_items:
+                raise SystemExit(f"No Stage 1 bboxes found in {stage1_bboxes_json}")
 
-            raw_bbox = clamp_bbox(polygon_bbox(polygons), wsi_w, wsi_h)
-            raw_area = float(max(1, raw_bbox[2] - raw_bbox[0]) * max(1, raw_bbox[3] - raw_bbox[1]))
-            if raw_area < args.min_bbox_area:
-                continue
+            for bbox_id, raw_bbox_unclamped, region in stage1_items:
+                raw_bbox = clamp_bbox(raw_bbox_unclamped, wsi_w, wsi_h)
+                padded_bbox = pad_bbox(raw_bbox, args.padding_frac, wsi_w, wsi_h)
+                intersecting = [
+                    item for item in trident_polygons if bbox_intersects(item.bbox_level0, padded_bbox)
+                ]
+                stage3_dir = bboxes_dir / bbox_id / "stage3"
+                if stage3_dir.exists() and not args.overwrite:
+                    print(f"Skipping existing: {stage3_dir}")
+                    continue
+                stage3_dir.mkdir(parents=True, exist_ok=True)
 
-            padded_bbox = pad_bbox(raw_bbox, args.padding_frac, wsi_w, wsi_h)
-            core_id = safe_core_id(feature_idx, properties, raw_bbox)
-            stage3_dir = bboxes_dir / core_id / "stage3"
-            if stage3_dir.exists() and not args.overwrite:
-                print(f"Skipping existing: {stage3_dir}")
-                continue
-            stage3_dir.mkdir(parents=True, exist_ok=True)
+                crop, read_level, read_downsample = read_bbox_crop(
+                    wsi,
+                    reader,
+                    pyramid,
+                    padded_bbox,
+                    args.max_dim,
+                )
+                mask = build_mask([item.polygons for item in intersecting], padded_bbox, crop.size)
+                overlay = build_overlay(crop, mask, args.overlay_alpha)
 
-            crop, read_level, read_downsample = read_bbox_crop(
-                wsi,
-                reader,
-                pyramid,
-                padded_bbox,
-                args.max_dim,
-            )
-            mask = build_mask(polygons, padded_bbox, crop.size)
-            overlay = build_overlay(crop, mask, args.overlay_alpha)
+                crop_path = stage3_dir / "crop.png"
+                mask_path = stage3_dir / "mask.png"
+                overlay_path = stage3_dir / "overlay.png"
+                crop.save(crop_path)
+                mask.save(mask_path)
+                overlay.save(overlay_path)
 
-            crop_path = stage3_dir / "crop.png"
-            mask_path = stage3_dir / "mask.png"
-            overlay_path = stage3_dir / "overlay.png"
-            crop.save(crop_path)
-            mask.save(mask_path)
-            overlay.save(overlay_path)
+                trident_feature_indices = sorted({item.feature_index for item in intersecting})
+                metadata = {
+                    "source": "trident_geojson_stage1_bbox",
+                    "review_unit": review_unit,
+                    "wsi_path": str(wsi_path),
+                    "geojson_path": str(geojson_path),
+                    "stage1_bboxes_json": str(stage1_bboxes_json),
+                    "case_id": case_id,
+                    "run_id": run_id,
+                    "bbox_id": bbox_id,
+                    "bbox_level0": list(raw_bbox),
+                    "padded_bbox_level0": list(padded_bbox),
+                    "stage1_region": region,
+                    "trident_feature_indices": trident_feature_indices,
+                    "trident_feature_count": len(intersecting),
+                    "crop_size": list(crop.size),
+                    "read_level": int(read_level),
+                    "read_downsample": float(read_downsample),
+                    "resolved_wsi_reader": reader,
+                    "overlay_alpha": float(args.overlay_alpha),
+                }
+                write_json(stage3_dir / "metadata.json", metadata)
+                manifest_rows.append(
+                    {
+                        "case_id": case_id,
+                        "run_id": run_id,
+                        "bbox_id": bbox_id,
+                        "review_unit": review_unit,
+                        "feature_index": "",
+                        "trident_feature_indices": " ".join(str(v) for v in trident_feature_indices),
+                        "trident_feature_count": len(intersecting),
+                        "bbox_level0": " ".join(str(v) for v in raw_bbox),
+                        "padded_bbox_level0": " ".join(str(v) for v in padded_bbox),
+                        "crop_path": str(crop_path),
+                        "mask_path": str(mask_path),
+                        "overlay_path": str(overlay_path),
+                        "metadata_path": str(stage3_dir / "metadata.json"),
+                    }
+                )
 
-            metadata = {
-                "source": "trident_geojson",
-                "wsi_path": str(wsi_path),
-                "geojson_path": str(geojson_path),
-                "case_id": case_id,
-                "run_id": run_id,
-                "bbox_id": core_id,
-                "feature_index": feature_idx,
-                "properties": properties,
-                "bbox_level0": list(raw_bbox),
-                "padded_bbox_level0": list(padded_bbox),
-                "crop_size": list(crop.size),
-                "read_level": int(read_level),
-                "read_downsample": float(read_downsample),
-                "resolved_wsi_reader": reader,
-                "overlay_alpha": float(args.overlay_alpha),
-            }
-            write_json(stage3_dir / "metadata.json", metadata)
-            manifest_rows.append(
-                {
+                exported += 1
+                if args.max_items is not None and exported >= args.max_items:
+                    break
+        else:
+            for item_idx, item in enumerate(trident_polygons):
+                raw_bbox = item.bbox_level0
+                padded_bbox = pad_bbox(raw_bbox, args.padding_frac, wsi_w, wsi_h)
+                core_id = safe_core_id(item_idx, item.properties, raw_bbox)
+                stage3_dir = bboxes_dir / core_id / "stage3"
+                if stage3_dir.exists() and not args.overwrite:
+                    print(f"Skipping existing: {stage3_dir}")
+                    continue
+                stage3_dir.mkdir(parents=True, exist_ok=True)
+
+                crop, read_level, read_downsample = read_bbox_crop(
+                    wsi,
+                    reader,
+                    pyramid,
+                    padded_bbox,
+                    args.max_dim,
+                )
+                mask = build_mask([item.polygons], padded_bbox, crop.size)
+                overlay = build_overlay(crop, mask, args.overlay_alpha)
+
+                crop_path = stage3_dir / "crop.png"
+                mask_path = stage3_dir / "mask.png"
+                overlay_path = stage3_dir / "overlay.png"
+                crop.save(crop_path)
+                mask.save(mask_path)
+                overlay.save(overlay_path)
+
+                metadata = {
+                    "source": "trident_geojson",
+                    "review_unit": review_unit,
+                    "wsi_path": str(wsi_path),
+                    "geojson_path": str(geojson_path),
                     "case_id": case_id,
                     "run_id": run_id,
                     "bbox_id": core_id,
-                    "feature_index": feature_idx,
-                    "bbox_level0": " ".join(str(v) for v in raw_bbox),
-                    "padded_bbox_level0": " ".join(str(v) for v in padded_bbox),
-                    "crop_path": str(crop_path),
-                    "mask_path": str(mask_path),
-                    "overlay_path": str(overlay_path),
-                    "metadata_path": str(stage3_dir / "metadata.json"),
+                    "feature_index": item.feature_index,
+                    "properties": item.properties,
+                    "bbox_level0": list(raw_bbox),
+                    "padded_bbox_level0": list(padded_bbox),
+                    "crop_size": list(crop.size),
+                    "read_level": int(read_level),
+                    "read_downsample": float(read_downsample),
+                    "resolved_wsi_reader": reader,
+                    "overlay_alpha": float(args.overlay_alpha),
                 }
-            )
+                write_json(stage3_dir / "metadata.json", metadata)
+                manifest_rows.append(
+                    {
+                        "case_id": case_id,
+                        "run_id": run_id,
+                        "bbox_id": core_id,
+                        "review_unit": review_unit,
+                        "feature_index": item.feature_index,
+                        "trident_feature_indices": str(item.feature_index),
+                        "trident_feature_count": 1,
+                        "bbox_level0": " ".join(str(v) for v in raw_bbox),
+                        "padded_bbox_level0": " ".join(str(v) for v in padded_bbox),
+                        "crop_path": str(crop_path),
+                        "mask_path": str(mask_path),
+                        "overlay_path": str(overlay_path),
+                        "metadata_path": str(stage3_dir / "metadata.json"),
+                    }
+                )
 
-            exported += 1
-            if args.max_items is not None and exported >= args.max_items:
-                break
+                exported += 1
+                if args.max_items is not None and exported >= args.max_items:
+                    break
 
         run_meta = {
             "source": "trident_geojson",
+            "review_unit": review_unit,
             "created_at": datetime.now().isoformat(),
             "wsi_path": str(wsi_path),
             "wsi_manifest": str(wsi_manifest) if wsi_manifest else None,
             "geojson_path": str(geojson_path),
             "contour_path": str(Path(args.contour).resolve()) if args.contour else None,
+            "stage1_bboxes_json": str(stage1_bboxes_json) if stage1_bboxes_json else None,
             "slide_id": slide_id,
             "case_id": case_id,
             "run_id": run_id,
             "output_root": str(args.output_root),
             "exported_items": len(manifest_rows),
+            "trident_polygons_loaded": len(trident_polygons),
             "wsi_dimensions_level0": [int(wsi_w), int(wsi_h)],
             "resolved_wsi_reader": reader,
             "reviewer_batch_command": (
@@ -583,7 +824,10 @@ def main() -> int:
         "case_id",
         "run_id",
         "bbox_id",
+        "review_unit",
         "feature_index",
+        "trident_feature_indices",
+        "trident_feature_count",
         "bbox_level0",
         "padded_bbox_level0",
         "crop_path",
