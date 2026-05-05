@@ -164,4 +164,11 @@ Key files:
 - `bboxes/<core_id>/stage3/overlay.png`
 - `bboxes/<core_id>/stage3/metadata.json`
 
+Each Stage 3 `metadata.json` records read-level details and review-input
+quality flags:
+- `read_level`, `read_downsample`, `read_size`
+- `quality.crop_long_edge`, `quality.crop_short_edge`
+- `quality.needs_force_read_l0_review`
+- `force_read_l0`, `estimated_l0_megapixels`, `image_files_written`
+
 This layout is intentionally compatible with `run_vlm_reviewer_batch.py --baseline-dir`.

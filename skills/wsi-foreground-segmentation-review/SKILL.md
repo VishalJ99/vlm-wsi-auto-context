@@ -100,7 +100,9 @@ python scripts/export_trident_reviewer_inputs.py \
   --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
   --stage1-run-dir stage1_output/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64/google_gemini_3_flash_preview/<timestamp> \
   --output-root runs/trident_reviewer_inputs \
+  --wsi-manifest /vol/biomedic3/histopatho/win_share/all_svs_fpaths.csv \
   --max-dim 2048 \
+  --min-review-long-edge 1024 \
   --padding-frac 0.08
 ```
 
@@ -110,6 +112,7 @@ Then run the existing batch reviewer:
 python run_vlm_reviewer_batch.py \
   --baseline-dir runs/trident_reviewer_inputs \
   --run-selection latest \
+  --run-name <export_run_id> \
   --output-root runs/reviewer \
   --batch-name trident_hest_review_v1 \
   --prompt-file prompts/calibration_reviewer.txt \
@@ -126,9 +129,11 @@ If TRIDENT includes too much background, try `--seg_conf_thresh 0.4`, `--remove_
 TRIDENT review building blocks:
 
 - A contour JPG is only a QC thumbnail; the reviewable segmentation is the matching GeoJSON.
-- The WSI pixels come from the source `.svs`, resolved by `anon_<uuid>.svs` through the WSI manifest.
+- The WSI pixels come from the source `.svs`, resolved by `anon_<uuid>.svs` through `/vol/biomedic3/histopatho/win_share/all_svs_fpaths.csv`; pass it explicitly with `--wsi-manifest` if there is any ambiguity. `/data2/vj724/wsi-agents/all_svs_fpaths.csv` is a legacy fallback copy.
 - Tissue-core bboxes come from the existing VLM Stage 1 detector routed through OpenRouter.
 - The exporter reads each Stage 1 bbox from the WSI, rasterizes all intersecting TRIDENT GeoJSON polygons at crop resolution, writes `crop.png`, `mask.png`, `overlay.png`, and `metadata.json`, then the batch reviewer consumes that Stage3-compatible layout.
+- If a case has multiple exported runs, pass `--run-name <run_id>` or `--run-pattern <glob>` to `run_vlm_reviewer_batch.py` before paid calls; do not rely on `--run-selection latest` across mixed run names.
+- Before paying for reviewer calls, inspect `metadata.json` and treat `quality.needs_force_read_l0_review=true` or a saved crop max dimension below 1024 (`quality.crop_long_edge < 1024`) as a route trigger: rerun the export with `--force-read-l0` if the level-0 crop is below the `--max-l0-read-mpix` guardrail. Use `--skip-image-save` only for high-resolution read experiments when the current PNG inputs are already enough and reviewer-ready high-res PNGs are not needed.
 - If Stage 1 bboxes are omitted, the exporter falls back to per-contour-feature crops; use that only for debugging, not routine per-core QC.
 
 ## Route 2: Repo VLM Foreground Pipeline

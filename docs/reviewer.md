@@ -62,15 +62,27 @@ Rasterize the WSI-level TRIDENT contours into each Stage 1 tissue-core bbox:
 python scripts/export_trident_reviewer_inputs.py \
   --contour /data2/vj724/path-agent/outputs/trident_output_hest_task1/contours/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64.jpg \
   --stage1-run-dir stage1_output/anon_0c1699ad-e029-4ea6-91ea-8807a0fabb64/google_gemini_3_flash_preview/<timestamp> \
-  --output-root runs/trident_reviewer_inputs
+  --output-root runs/trident_reviewer_inputs \
+  --wsi-manifest /vol/biomedic3/histopatho/win_share/all_svs_fpaths.csv \
+  --min-review-long-edge 1024
 ```
 
 The exporter also accepts `--stage1-bboxes-json`, `--geojson`,
 `--trident-job-dir`, and explicit `--wsi`. If `--wsi` is omitted, it resolves
-`anon_<uuid>.svs` via known local WSI manifests, including
-`/data2/vj724/wsi-agents/all_svs_fpaths.csv`. If Stage 1 bboxes are omitted,
+`anon_<uuid>.svs` via known local WSI manifests, preferring the WSI-root
+manifest `/vol/biomedic3/histopatho/win_share/all_svs_fpaths.csv`. If Stage 1
+bboxes are omitted,
 the exporter falls back to legacy per-contour-feature crops, which is usually
 not the right unit for tissue-core review.
+
+Review input quality rule: inspect `bboxes/*/stage3/metadata.json`. If the saved
+crop max dimension (`quality.crop_long_edge`) is below 1024, or
+`quality.needs_force_read_l0_review=true`, rerun that export with
+`--force-read-l0` when the level-0 bbox size is below the
+`--max-l0-read-mpix` guardrail. If you only need to test the high-resolution
+read path and do not need reviewer-ready PNGs, add `--skip-image-save` to avoid
+the PNG encoding cost; those metadata-only outputs are not reviewer inputs until
+PNG files are written.
 
 Then review the exported inputs:
 
@@ -83,6 +95,10 @@ python run_vlm_reviewer_batch.py \
   --qc-precision-threshold 0.9 \
   --qc-recall-threshold 0.9
 ```
+
+If a case has multiple exported runs, pass `--run-name <run_id>` or
+`--run-pattern <glob>` so paid reviewer calls target the intended inputs rather
+than the lexicographically latest run directory.
 
 ## Single-Item Workflow
 

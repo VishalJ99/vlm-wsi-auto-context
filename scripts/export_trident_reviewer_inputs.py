@@ -46,7 +46,18 @@ class TridentPolygon:
     bbox_level0: BBox
 
 
+@dataclass(frozen=True)
+class ReadPlan:
+    level: int
+    downsample: float
+    read_width: int
+    read_height: int
+    force_read_l0: bool
+    estimated_l0_megapixels: float
+
+
 DEFAULT_WSI_MANIFESTS = [
+    Path("/vol/biomedic3/histopatho/win_share/all_svs_fpaths.csv"),
     Path("/data2/vj724/wsi-agents/all_svs_fpaths.csv"),
     Path("/data2/vj724/benchmark_label_image_ocr/svs_file_paths.txt"),
     Path("/data2/vj724/anon_filenames_mapping.txt"),
@@ -159,6 +170,49 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=2048,
         help="Maximum long edge for exported reviewer crop/overlay.",
+    )
+    parser.add_argument(
+        "--min-review-long-edge",
+        type=int,
+        default=1024,
+        help=(
+            "Flag reviewer crops whose saved long edge is below this many pixels. "
+            "Use 0 to disable the flag."
+        ),
+    )
+    parser.add_argument(
+        "--min-review-short-edge",
+        type=int,
+        default=0,
+        help=(
+            "Optional flag for reviewer crops whose saved short edge is below this many pixels. "
+            "Use 0 to disable; useful for tall skinny cores."
+        ),
+    )
+    parser.add_argument(
+        "--force-read-l0",
+        action="store_true",
+        help=(
+            "Read bbox crops from level 0 before resizing to --max-dim. "
+            "Guarded by --max-l0-read-mpix to avoid accidental huge allocations."
+        ),
+    )
+    parser.add_argument(
+        "--max-l0-read-mpix",
+        type=float,
+        default=512.0,
+        help=(
+            "Maximum level-0 crop size in megapixels allowed with --force-read-l0 "
+            "(default: 512)."
+        ),
+    )
+    parser.add_argument(
+        "--skip-image-save",
+        action="store_true",
+        help=(
+            "Build crop/mask/overlay and metadata but do not save PNG files. "
+            "Use for high-resolution read experiments when reviewer-ready PNGs are not needed."
+        ),
     )
     parser.add_argument(
         "--padding-frac",
@@ -389,28 +443,67 @@ def choose_read_level(pyramid: dict, bbox_w: int, bbox_h: int, max_dim: int) -> 
     return best_level, float(pyramid["level_downsamples"][best_level])
 
 
+def make_read_plan(
+    pyramid: dict,
+    bbox_w: int,
+    bbox_h: int,
+    max_dim: int,
+    force_read_l0: bool,
+    max_l0_read_mpix: float,
+) -> ReadPlan:
+    estimated_l0_mpix = (float(bbox_w) * float(bbox_h)) / 1_000_000.0
+    if force_read_l0:
+        if estimated_l0_mpix > max_l0_read_mpix:
+            raise SystemExit(
+                "Refusing --force-read-l0 for bbox "
+                f"{bbox_w}x{bbox_h} ({estimated_l0_mpix:.1f} MPix), "
+                f"above --max-l0-read-mpix={max_l0_read_mpix:.1f}. "
+                "Raise the guardrail only if this allocation is intentional."
+            )
+        level = 0
+        downsample = float(pyramid["level_downsamples"][0])
+    else:
+        level, downsample = choose_read_level(pyramid, bbox_w, bbox_h, max_dim)
+
+    return ReadPlan(
+        level=level,
+        downsample=downsample,
+        read_width=max(1, int(np.ceil(bbox_w / downsample))),
+        read_height=max(1, int(np.ceil(bbox_h / downsample))),
+        force_read_l0=force_read_l0,
+        estimated_l0_megapixels=estimated_l0_mpix,
+    )
+
+
 def read_bbox_crop(
     wsi,
     reader: str,
     pyramid: dict,
     bbox: BBox,
     max_dim: int,
-) -> Tuple[Image.Image, int, float]:
+    force_read_l0: bool,
+    max_l0_read_mpix: float,
+) -> Tuple[Image.Image, ReadPlan]:
     x1, y1, x2, y2 = bbox
     bbox_w = max(1, x2 - x1)
     bbox_h = max(1, y2 - y1)
-    level, downsample = choose_read_level(pyramid, bbox_w, bbox_h, max_dim)
-    read_w = max(1, int(np.ceil(bbox_w / downsample)))
-    read_h = max(1, int(np.ceil(bbox_h / downsample)))
+    plan = make_read_plan(
+        pyramid=pyramid,
+        bbox_w=bbox_w,
+        bbox_h=bbox_h,
+        max_dim=max_dim,
+        force_read_l0=force_read_l0,
+        max_l0_read_mpix=max_l0_read_mpix,
+    )
 
     arr = read_region_rgb(
         wsi,
         reader,
         x=x1,
         y=y1,
-        width=read_w,
-        height=read_h,
-        level=level,
+        width=plan.read_width,
+        height=plan.read_height,
+        level=plan.level,
     )
     crop = Image.fromarray(arr).convert("RGB")
     long_edge = max(crop.size)
@@ -424,7 +517,27 @@ def read_bbox_crop(
             ),
             resampling,
         )
-    return crop, level, downsample
+    return crop, plan
+
+
+def crop_quality_flags(
+    crop: Image.Image,
+    min_review_long_edge: int,
+    min_review_short_edge: int,
+) -> dict:
+    long_edge = max(crop.size)
+    short_edge = min(crop.size)
+    below_long = min_review_long_edge > 0 and long_edge < min_review_long_edge
+    below_short = min_review_short_edge > 0 and short_edge < min_review_short_edge
+    return {
+        "crop_long_edge": int(long_edge),
+        "crop_short_edge": int(short_edge),
+        "min_review_long_edge": int(min_review_long_edge),
+        "min_review_short_edge": int(min_review_short_edge),
+        "below_min_review_long_edge": bool(below_long),
+        "below_min_review_short_edge": bool(below_short),
+        "needs_force_read_l0_review": bool((below_long or below_short)),
+    }
 
 
 def transform_ring(ring: Ring, bbox: BBox, output_size: Tuple[int, int]) -> List[Tuple[int, int]]:
@@ -601,6 +714,12 @@ def main() -> int:
     args = parse_args()
     if args.max_dim < 1:
         raise SystemExit("--max-dim must be >= 1")
+    if args.min_review_long_edge < 0:
+        raise SystemExit("--min-review-long-edge must be >= 0")
+    if args.min_review_short_edge < 0:
+        raise SystemExit("--min-review-short-edge must be >= 0")
+    if args.max_l0_read_mpix <= 0:
+        raise SystemExit("--max-l0-read-mpix must be > 0")
     if args.max_items is not None and args.max_items < 1:
         raise SystemExit("--max-items must be >= 1")
 
@@ -662,12 +781,14 @@ def main() -> int:
                     continue
                 stage3_dir.mkdir(parents=True, exist_ok=True)
 
-                crop, read_level, read_downsample = read_bbox_crop(
+                crop, read_plan = read_bbox_crop(
                     wsi,
                     reader,
                     pyramid,
                     padded_bbox,
                     args.max_dim,
+                    args.force_read_l0,
+                    args.max_l0_read_mpix,
                 )
                 mask = build_mask([item.polygons for item in intersecting], padded_bbox, crop.size)
                 overlay = build_overlay(crop, mask, args.overlay_alpha)
@@ -675,11 +796,18 @@ def main() -> int:
                 crop_path = stage3_dir / "crop.png"
                 mask_path = stage3_dir / "mask.png"
                 overlay_path = stage3_dir / "overlay.png"
-                crop.save(crop_path)
-                mask.save(mask_path)
-                overlay.save(overlay_path)
+                image_files_written = not args.skip_image_save
+                if image_files_written:
+                    crop.save(crop_path)
+                    mask.save(mask_path)
+                    overlay.save(overlay_path)
 
                 trident_feature_indices = sorted({item.feature_index for item in intersecting})
+                quality = crop_quality_flags(
+                    crop,
+                    args.min_review_long_edge,
+                    args.min_review_short_edge,
+                )
                 metadata = {
                     "source": "trident_geojson_stage1_bbox",
                     "review_unit": review_unit,
@@ -695,8 +823,13 @@ def main() -> int:
                     "trident_feature_indices": trident_feature_indices,
                     "trident_feature_count": len(intersecting),
                     "crop_size": list(crop.size),
-                    "read_level": int(read_level),
-                    "read_downsample": float(read_downsample),
+                    "read_level": int(read_plan.level),
+                    "read_downsample": float(read_plan.downsample),
+                    "read_size": [int(read_plan.read_width), int(read_plan.read_height)],
+                    "force_read_l0": bool(read_plan.force_read_l0),
+                    "estimated_l0_megapixels": float(read_plan.estimated_l0_megapixels),
+                    "image_files_written": bool(image_files_written),
+                    "quality": quality,
                     "resolved_wsi_reader": reader,
                     "overlay_alpha": float(args.overlay_alpha),
                 }
@@ -716,6 +849,8 @@ def main() -> int:
                         "mask_path": str(mask_path),
                         "overlay_path": str(overlay_path),
                         "metadata_path": str(stage3_dir / "metadata.json"),
+                        "image_files_written": image_files_written,
+                        "needs_force_read_l0_review": quality["needs_force_read_l0_review"],
                     }
                 )
 
@@ -733,12 +868,14 @@ def main() -> int:
                     continue
                 stage3_dir.mkdir(parents=True, exist_ok=True)
 
-                crop, read_level, read_downsample = read_bbox_crop(
+                crop, read_plan = read_bbox_crop(
                     wsi,
                     reader,
                     pyramid,
                     padded_bbox,
                     args.max_dim,
+                    args.force_read_l0,
+                    args.max_l0_read_mpix,
                 )
                 mask = build_mask([item.polygons], padded_bbox, crop.size)
                 overlay = build_overlay(crop, mask, args.overlay_alpha)
@@ -746,10 +883,17 @@ def main() -> int:
                 crop_path = stage3_dir / "crop.png"
                 mask_path = stage3_dir / "mask.png"
                 overlay_path = stage3_dir / "overlay.png"
-                crop.save(crop_path)
-                mask.save(mask_path)
-                overlay.save(overlay_path)
+                image_files_written = not args.skip_image_save
+                if image_files_written:
+                    crop.save(crop_path)
+                    mask.save(mask_path)
+                    overlay.save(overlay_path)
 
+                quality = crop_quality_flags(
+                    crop,
+                    args.min_review_long_edge,
+                    args.min_review_short_edge,
+                )
                 metadata = {
                     "source": "trident_geojson",
                     "review_unit": review_unit,
@@ -763,8 +907,13 @@ def main() -> int:
                     "bbox_level0": list(raw_bbox),
                     "padded_bbox_level0": list(padded_bbox),
                     "crop_size": list(crop.size),
-                    "read_level": int(read_level),
-                    "read_downsample": float(read_downsample),
+                    "read_level": int(read_plan.level),
+                    "read_downsample": float(read_plan.downsample),
+                    "read_size": [int(read_plan.read_width), int(read_plan.read_height)],
+                    "force_read_l0": bool(read_plan.force_read_l0),
+                    "estimated_l0_megapixels": float(read_plan.estimated_l0_megapixels),
+                    "image_files_written": bool(image_files_written),
+                    "quality": quality,
                     "resolved_wsi_reader": reader,
                     "overlay_alpha": float(args.overlay_alpha),
                 }
@@ -784,6 +933,8 @@ def main() -> int:
                         "mask_path": str(mask_path),
                         "overlay_path": str(overlay_path),
                         "metadata_path": str(stage3_dir / "metadata.json"),
+                        "image_files_written": image_files_written,
+                        "needs_force_read_l0_review": quality["needs_force_read_l0_review"],
                     }
                 )
 
@@ -808,6 +959,15 @@ def main() -> int:
             "trident_polygons_loaded": len(trident_polygons),
             "wsi_dimensions_level0": [int(wsi_w), int(wsi_h)],
             "resolved_wsi_reader": reader,
+            "max_dim": int(args.max_dim),
+            "min_review_long_edge": int(args.min_review_long_edge),
+            "min_review_short_edge": int(args.min_review_short_edge),
+            "force_read_l0": bool(args.force_read_l0),
+            "max_l0_read_mpix": float(args.max_l0_read_mpix),
+            "skip_image_save": bool(args.skip_image_save),
+            "items_needing_force_read_l0_review": int(
+                sum(bool(row["needs_force_read_l0_review"]) for row in manifest_rows)
+            ),
             "reviewer_batch_command": (
                 f"python run_vlm_reviewer_batch.py --baseline-dir {args.output_root} "
                 f"--run-selection latest --output-root runs/reviewer "
@@ -834,6 +994,8 @@ def main() -> int:
         "mask_path",
         "overlay_path",
         "metadata_path",
+        "image_files_written",
+        "needs_force_read_l0_review",
     ]
     with manifest_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

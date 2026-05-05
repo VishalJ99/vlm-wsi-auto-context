@@ -278,8 +278,18 @@ def is_run_dir(path: Path) -> bool:
     return (path / "bboxes").is_dir()
 
 
-def list_case_run_dirs(case_dir: Path, run_selection: str) -> List[Path]:
+def list_case_run_dirs(
+    case_dir: Path,
+    run_selection: str,
+    run_names: Sequence[str],
+    run_patterns: Sequence[str],
+) -> List[Path]:
     runs = sorted([p for p in case_dir.iterdir() if is_run_dir(p)])
+    if run_names:
+        keep = set(run_names)
+        runs = [p for p in runs if p.name in keep]
+    if run_patterns:
+        runs = [p for p in runs if any(fnmatch.fnmatch(p.name, pat) for pat in run_patterns)]
     if run_selection == "latest":
         return runs[-1:] if runs else []
     return runs
@@ -288,6 +298,8 @@ def list_case_run_dirs(case_dir: Path, run_selection: str) -> List[Path]:
 def collect_tasks(
     baseline_dir: Path,
     run_selection: str,
+    run_names: Sequence[str],
+    run_patterns: Sequence[str],
     case_allowlist: Optional[set[str]],
     case_patterns: Sequence[str],
     max_cases: Optional[int],
@@ -303,7 +315,7 @@ def collect_tasks(
         if case_patterns and not any(fnmatch.fnmatch(case_id, pat) for pat in case_patterns):
             continue
 
-        run_dirs = list_case_run_dirs(case_dir, run_selection)
+        run_dirs = list_case_run_dirs(case_dir, run_selection, run_names, run_patterns)
         if not run_dirs:
             continue
 
@@ -667,6 +679,18 @@ def parse_args() -> argparse.Namespace:
     io = parser.add_argument_group("Input Selection")
     io.add_argument("--baseline-dir", default=DEFAULT_BASELINE_DIR, help=f"Baseline root (default: {DEFAULT_BASELINE_DIR})")
     io.add_argument("--run-selection", choices=["latest", "all"], default="latest", help="Use latest run per case or all runs")
+    io.add_argument(
+        "--run-name",
+        action="append",
+        default=[],
+        help="Only include run directories with this exact name. Repeatable.",
+    )
+    io.add_argument(
+        "--run-pattern",
+        action="append",
+        default=[],
+        help="Only include run directories matching this glob pattern. Repeatable.",
+    )
     io.add_argument("--cases-file", default=None, help="Optional text file with case IDs to include")
     io.add_argument(
         "--case-pattern",
@@ -790,6 +814,8 @@ def main() -> int:
     tasks = collect_tasks(
         baseline_dir=baseline_dir,
         run_selection=args.run_selection,
+        run_names=args.run_name,
+        run_patterns=args.run_pattern,
         case_allowlist=case_allowlist,
         case_patterns=args.case_pattern,
         max_cases=args.max_cases,
