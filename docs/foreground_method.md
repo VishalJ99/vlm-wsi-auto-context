@@ -22,6 +22,20 @@ For production-like paper runs:
 
 Reviewer-guided Stage 3 reruns are external/manual (not currently auto-wired in the orchestrator).
 
+For the PER-188 distilled-classifier plan, route foreground segmentation in two
+modes once a runnable distilled classifier exists:
+
+1. Run the distilled foreground/background patch classifier first and review the
+   resulting masks, using Tol Blue as the hard OOD stain gate.
+2. If reviewer QC fails, is uncertain, or lacks adequate-resolution review
+   inputs, fall back to `run_auto_context.py` with `--stage6-icl-k 1` and
+   `--stage2-force-read-l0`.
+
+This repo currently has teacher outputs that are useful for distillation, but no
+checked-in distilled dataset exporter, trainer, or Stage6-compatible inference
+runner. Verify that those scripts exist before treating the distilled route as
+runnable.
+
 ## Why Stages Exist
 
 - Stage 1 reduces search space cheaply at thumbnail resolution.
@@ -31,6 +45,8 @@ Reviewer-guided Stage 3 reruns are external/manual (not currently auto-wired in 
 - Stage 5 re-ranks/curates high-quality ICL examples.
 - Stage 6 performs final patch-level VLM classification (optionally gated by Stage 3).
 - Stage 7 cleans masks/class maps into final postprocessed tissue masks.
+- A future distilled runner should replace Stage 6 VLM calls while preserving
+  the Stage 6/7 output contract.
 
 ## Canonical Invocation
 

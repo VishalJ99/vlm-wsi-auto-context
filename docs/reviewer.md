@@ -31,6 +31,12 @@ OpenRouter reasoning effort `high`, temperature `0.0`, and strict thresholding:
 `recall_pass = recall > --qc-recall-threshold`, and
 `overall_pass = precision_pass and recall_pass`.
 
+For distilled-classifier routing, use reviewer QC as the gate before downstream
+linear-probe experiments. Tol Blue is the hard OOD acceptance stain. If any
+required tissue-core bbox has `qc.overall_pass=false`, or if the reviewer inputs
+are too low-resolution to judge, route the case to the heavier repo VLM
+foreground path with `--stage6-icl-k 1` and `--stage2-force-read-l0`.
+
 ## TRIDENT / External Mask Workflow
 
 TRIDENT emits contour JPGs and GeoJSON contours, not this repo's Stage 3

@@ -1,7 +1,7 @@
 interface:
   display_name: "WSI Foreground Segmentation Review"
-  short_description: "Plan and review WSI foreground masks"
-  default_prompt: "Use $wsi-foreground-segmentation-review to run or review a histopathology WSI foreground segmentation workflow."
+  short_description: "Route, run, and review WSI foreground masks"
+  default_prompt: "Use $wsi-foreground-segmentation-review to route, run, or review a histopathology WSI foreground segmentation workflow."
 
 policy:
   allow_implicit_invocation: true

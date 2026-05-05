@@ -1,11 +1,11 @@
 ---
 name: wsi-foreground-segmentation-review
-description: Use when running or planning histopathology WSI foreground/background segmentation with TRIDENT, the vlm-wsi-auto-context foreground pipeline, VLM segmentation review, or future distilled foreground/background patch-classifier routes. Includes route selection, IO contracts, default TTA policies, reviewer inputs, and distillation gaps.
+description: Use when running or planning histopathology WSI foreground/background segmentation with TRIDENT, the vlm-wsi-auto-context foreground pipeline, VLM segmentation review, or distilled foreground/background patch-classifier routing. Includes distilled-first vs VLM fallback selection, Tol Blue OOD quality gates, IO contracts, default TTA policies, reviewer inputs, and distillation gaps.
 ---
 
 # WSI Foreground Segmentation + Review
 
-Use this skill for repeat histopathology foreground/background work: segment tissue foreground, review mask quality, escalate hard cases to VLM, and plan VLM-to-student distillation.
+Use this skill for repeat histopathology foreground/background work: segment tissue foreground, review mask quality, run distilled-first routing when a student classifier exists, escalate hard cases to VLM, and plan VLM-to-student distillation.
 
 ## First Checks
 
@@ -21,9 +21,16 @@ There are three foreground/background routes:
 
 1. **TRIDENT route**: fastest classical/deep baseline with TRIDENT IO. Outputs GeoJSON foreground contours, contour thumbnails, and HDF5 foreground patch coordinates.
 2. **Repo VLM route**: this repo's staged auto-context method. Outputs per-bbox Stage 3 masks, Stage 6 VLM patch classifications, and Stage 7 postprocessed tissue masks.
-3. **Distilled route**: intended future route. Run bbox detection and context stages, then replace Stage 6 VLM patch classification with a trained lightweight FG/BG patch classifier. This repo did not contain that train/inference script when this skill was drafted; verify with `rg -i "distill|train|student|classifier"`.
+3. **Distilled route**: target fast route. Run bbox detection and context stages, then replace Stage 6 VLM patch classification with a trained lightweight FG/BG patch classifier. This repo did not contain that train/inference script when this skill was drafted or when rechecked on 2026-05-05; verify with `rg -i "distill|train|student|classifier"` before advertising it as runnable.
 
-Use TRIDENT first for a cheap baseline. Use repo VLM when TRIDENT masks fail quality review or when artifacts/background need VLM reasoning. Use distilled only after a teacher-labeled dataset and classifier runner exist.
+Current PER-188 production target is a two-mode router, not TRIDENT-first:
+
+- Use the distilled route first only after a runnable classifier and Stage6-compatible inference runner exist.
+- Gate the distilled route on the VLM reviewer, with Tol Blue as the hard OOD stain acceptance test. Default pass means every reviewed tissue-core bbox has `qc.overall_pass=true` at the chosen precision/recall thresholds.
+- If the distilled Tol Blue review passes, proceed to downstream linear-probe testing on Tol Blue WSIs and deprioritize foreground-segmentation fixes unless new evidence shows a quality problem.
+- If any required reviewer item fails, is too blurry for review, or cannot be reviewed, fall back to the repo VLM route with `--stage6-icl-k 1` and `--stage2-force-read-l0`.
+
+Use TRIDENT when the user asks for a cheap baseline or an external-segmentation review path. Use repo VLM when TRIDENT masks fail quality review, when artifacts/background need VLM reasoning, or when the distilled route fails its reviewer gate.
 
 ## Route 1: TRIDENT
 
@@ -139,6 +146,10 @@ TRIDENT review building blocks:
 ## Route 2: Repo VLM Foreground Pipeline
 
 Canonical entrypoint: `run_auto_context.py`. Wrapper: `scripts/run_paper_method.sh`.
+
+Use this route as the quality fallback when the distilled patch classifier is absent
+or fails reviewer QC. For this fallback, prefer ICL and high-resolution bbox reads:
+`--stage6-icl-k 1` plus `--stage2-force-read-l0`.
 
 User-preferred defaults for this workflow:
 
@@ -265,7 +276,9 @@ Batch reviewer discovers:
 
 ## Route 3: Distilled Patch Classifier
 
-As drafted, this repo has VLM teacher outputs but no trainer for a distilled FG/BG patch classifier. Existing useful teacher artifacts:
+As drafted and rechecked on 2026-05-05, this repo has VLM teacher outputs but no
+trainer or inference runner for a distilled FG/BG patch classifier. Existing
+useful teacher artifacts:
 
 - Stage 6 `patches.csv`: per-patch VLM labels and metadata.
 - Stage 6 `class_map.npy` / `quality_map.npy`: per-grid labels.
@@ -278,6 +291,18 @@ Do not claim distilled inference is implemented until the repo has at least:
 - An inference runner that writes Stage6-compatible `class_map.npy`, `patches.csv`, and metadata so Stage 7 can run unchanged.
 
 The likely clean integration is: keep Stage 1 bbox detection, optional Stage 3 gating, optional Stage 4/5 context generation for teacher runs, then swap Stage 6 VLM calls for the distilled classifier runner.
+
+When the runner exists, use this acceptance protocol:
+
+1. Run the distilled classifier on Tol Blue first, because Tol Blue is the current noisiest/OOD stain type in this project.
+2. Export or reuse reviewer-compatible inputs from the resulting Stage 7 masks.
+3. Run the calibration reviewer with the default QC policy below.
+4. If all reviewed tissue-core bboxes pass, treat the fast foreground route as good enough for downstream Tol Blue linear-probe experiments.
+5. If any bbox fails precision or recall, route that case to the repo VLM fallback with `--stage6-icl-k 1` and `--stage2-force-read-l0`.
+
+Do not use downstream UNI/CONCH linear-probe quality as the first segmentation
+gate. Review the foreground masks first, then decide whether a foreground fix is
+worth pursuing.
 
 ## Review Guidance
 
@@ -310,5 +335,7 @@ Escalation policy:
 
 - TRIDENT pass: keep contours/coords and record reviewer evidence.
 - TRIDENT uncertain/fail: run repo VLM route on the case.
+- Distilled pass on Tol Blue: proceed to downstream Tol Blue linear-probe testing and record reviewer evidence.
+- Distilled fail/uncertain: run repo VLM route with `--stage6-icl-k 1` and `--stage2-force-read-l0`.
 - VLM pass: optionally add teacher labels to distillation candidates.
 - VLM fail: inspect Stage 1 bboxes, Stage 4 point overlays, Stage 5 exemplars, and Stage 6 `patches.csv`; rerun with higher-resolution Stage 2 crops or adjusted prompts before distilling.
