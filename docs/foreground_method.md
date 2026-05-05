@@ -61,6 +61,9 @@ For one-off distilled checks against existing reviewer masks, use:
   script to run the checkpoint on that grid.
 - `scripts/build_distilled_student_comparison_visuals.py` to assemble reviewer
   comparison PNGs, an HTML index, and by-bbox metrics.
+- `scripts/build_trident_vs_distilled_comparison_visuals.py` to compare
+  TRIDENT foreground overlays, auto-context Stage 6 overlays, and both
+  distilled student overlays for the same Stage 1 bboxes.
 
 ## Canonical Invocation
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create compact review visuals for two distilled student inference outputs."""
+"""Create side-by-side TRIDENT vs distilled-student foreground overlays."""
 
 from __future__ import annotations
 
@@ -22,14 +22,15 @@ BORDER = (195, 198, 202)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", required=True, type=Path)
-    parser.add_argument("--input-stage6-root", type=Path)
+    parser.add_argument("--teacher-root", required=True, type=Path)
+    parser.add_argument("--trident-run-dir", required=True, type=Path)
     parser.add_argument("--student-a-name", default="zero_shot_student")
     parser.add_argument("--student-b-name", default="harder_qwen8bfew_student")
     parser.add_argument("--student-a-label", default="Distilled student A")
     parser.add_argument("--student-b-label", default="Distilled student B")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--max-panel-width", type=int, default=540)
-    parser.add_argument("--max-panel-height", type=int, default=760)
+    parser.add_argument("--max-panel-width", type=int, default=390)
+    parser.add_argument("--max-panel-height", type=int, default=620)
     return parser.parse_args()
 
 
@@ -40,14 +41,20 @@ def load_font(name: str, size: int):
         return ImageFont.load_default()
 
 
-FONT_TITLE = load_font("DejaVuSans-Bold.ttf", 22)
-FONT_SMALL = load_font("DejaVuSans.ttf", 16)
+FONT_TITLE = load_font("DejaVuSans-Bold.ttf", 20)
+FONT_SMALL = load_font("DejaVuSans.ttf", 14)
+
+
+def fmt(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    return f"{float(value):.4f}"
 
 
 def metric_line(metrics: dict | None) -> str:
     if not metrics:
         return "metrics unavailable"
-    return "F1 {f1:.3f}  P {precision:.3f}  R {recall:.3f}  AUPRC {auprc:.3f}".format(**metrics)
+    return "F1 {f1:.3f}  P {precision:.3f}  R {recall:.3f}".format(**metrics)
 
 
 def fit_image(path: Path, max_w: int, max_h: int) -> Image.Image:
@@ -58,26 +65,19 @@ def fit_image(path: Path, max_w: int, max_h: int) -> Image.Image:
 
 def add_panel(path: Path, title: str, subtitle: str, max_w: int, max_h: int) -> Image.Image:
     image = fit_image(path, max_w, max_h)
-    label_h = 72
+    label_h = 64
     panel = Image.new("RGB", (max_w, image.height + label_h + 18), PANEL_BG)
     draw = ImageDraw.Draw(panel)
     draw.rectangle([0, 0, max_w - 1, panel.height - 1], outline=BORDER)
-    draw.text((14, 10), title, font=FONT_TITLE, fill=TEXT)
-    draw.text((14, 42), subtitle, font=FONT_SMALL, fill=MUTED)
+    draw.text((12, 10), title, font=FONT_TITLE, fill=TEXT)
+    draw.text((12, 38), subtitle, font=FONT_SMALL, fill=MUTED)
     panel.paste(image, ((max_w - image.width) // 2, label_h))
     return panel
 
 
-def fmt(value: object) -> str:
-    if value is None or value == "":
-        return ""
-    return f"{float(value):.4f}"
-
-
 def main() -> None:
     args = parse_args()
-    input_root = args.input_stage6_root or args.run_root / "inputs" / "stage6_grid_from_trident_reviewer_masks"
-    output_dir = args.output_dir or args.run_root / "visuals"
+    output_dir = args.output_dir or args.run_root / "visuals" / "trident_vs_distilled"
     comp_dir = output_dir / "comparisons"
     comp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,47 +92,50 @@ def main() -> None:
 
     for entry in student_a["entries"]:
         case_id = entry["case_id"]
-        rel = entry["stage6_relpath"]
-        rel_parts = Path(rel).parts
-        if "bboxes" in rel_parts:
-            bbox = rel_parts[rel_parts.index("bboxes") + 1]
-        else:
-            bbox = rel_parts[1]
-        student_b_entry = student_b_by_key[(case_id, rel)]
+        rel_stage6 = entry["stage6_relpath"]
+        parts = Path(rel_stage6).parts
+        if "bboxes" not in parts:
+            raise RuntimeError(f"cannot infer bbox from stage6 relpath: {rel_stage6}")
+        bbox = parts[parts.index("bboxes") + 1]
+        student_b_entry = student_b_by_key[(case_id, rel_stage6)]
 
-        ref_path = input_root / case_id / rel / "trident_reference_overlay.png"
-        if not ref_path.exists():
-            ref_path = input_root / case_id / rel / "class_overlay.png"
-        student_a_path = student_a_root / case_id / rel / "student_class_overlay.png"
-        student_b_path = student_b_root / case_id / rel / "student_class_overlay.png"
+        trident_stage3 = args.trident_run_dir / "bboxes" / bbox / "stage3"
+        source_crop = trident_stage3 / "crop.png"
+        trident_overlay = trident_stage3 / "overlay.png"
+        teacher_overlay = args.teacher_root / case_id / rel_stage6 / "class_overlay.png"
+        student_a_overlay = student_a_root / case_id / rel_stage6 / "student_class_overlay.png"
+        student_b_overlay = student_b_root / case_id / rel_stage6 / "student_class_overlay.png"
 
         panels = [
-            add_panel(ref_path, "TRIDENT/reference mask", "synthetic Stage 6 label source", args.max_panel_width, args.max_panel_height),
+            add_panel(source_crop, "Source crop", "same Stage 1 bbox", args.max_panel_width, args.max_panel_height),
+            add_panel(trident_overlay, "TRIDENT HEST", "GeoJSON foreground", args.max_panel_width, args.max_panel_height),
+            add_panel(teacher_overlay, "Auto-context Stage 6", "original VLM overlay", args.max_panel_width, args.max_panel_height),
             add_panel(
-                student_a_path,
+                student_a_overlay,
                 args.student_a_label,
                 metric_line(entry.get("metrics_vs_teacher_binary")),
                 args.max_panel_width,
                 args.max_panel_height,
             ),
             add_panel(
-                student_b_path,
+                student_b_overlay,
                 args.student_b_label,
                 metric_line(student_b_entry.get("metrics_vs_teacher_binary")),
                 args.max_panel_width,
                 args.max_panel_height,
             ),
         ]
-        margin = 18
-        title_h = 64
+
+        margin = 16
+        title_h = 62
         width = sum(panel.width for panel in panels) + margin * (len(panels) + 1)
         height = max(panel.height for panel in panels) + margin * 2 + title_h
         canvas = Image.new("RGB", (width, height), BG)
         draw = ImageDraw.Draw(canvas)
-        draw.text((margin, 16), f"{case_id} / {bbox}", font=FONT_TITLE, fill=TEXT)
+        draw.text((margin, 14), f"{case_id} / {bbox}", font=FONT_TITLE, fill=TEXT)
         draw.text(
-            (margin, 46),
-            "Reference labels come from the TRIDENT reviewer mask; student overlays are MobileNetV3 distilled inference.",
+            (margin, 42),
+            "TRIDENT foreground compared with auto-context VLM and distilled MobileNetV3 foreground overlays.",
             font=FONT_SMALL,
             fill=MUTED,
         )
@@ -153,20 +156,19 @@ def main() -> None:
                 "case_id": case_id,
                 "bbox": bbox,
                 "n_patches": entry.get("n_patches"),
-                "student_a_f1": a_metrics.get("f1"),
-                "student_a_precision": a_metrics.get("precision"),
-                "student_a_recall": a_metrics.get("recall"),
-                "student_a_auprc": a_metrics.get("auprc"),
-                "student_a_auroc": a_metrics.get("auroc"),
-                "student_b_f1": b_metrics.get("f1"),
-                "student_b_precision": b_metrics.get("precision"),
-                "student_b_recall": b_metrics.get("recall"),
-                "student_b_auprc": b_metrics.get("auprc"),
-                "student_b_auroc": b_metrics.get("auroc"),
+                "student_a_f1_vs_auto_context_stage6": a_metrics.get("f1"),
+                "student_a_precision_vs_auto_context_stage6": a_metrics.get("precision"),
+                "student_a_recall_vs_auto_context_stage6": a_metrics.get("recall"),
+                "student_a_auprc_vs_auto_context_stage6": a_metrics.get("auprc"),
+                "student_b_f1_vs_auto_context_stage6": b_metrics.get("f1"),
+                "student_b_precision_vs_auto_context_stage6": b_metrics.get("precision"),
+                "student_b_recall_vs_auto_context_stage6": b_metrics.get("recall"),
+                "student_b_auprc_vs_auto_context_stage6": b_metrics.get("auprc"),
                 "comparison_png": str(out_path),
-                "reference_overlay": str(ref_path),
-                "student_a_overlay": str(student_a_path),
-                "student_b_overlay": str(student_b_path),
+                "trident_overlay": str(trident_overlay),
+                "teacher_overlay": str(teacher_overlay),
+                "student_a_overlay": str(student_a_overlay),
+                "student_b_overlay": str(student_b_overlay),
             }
         )
 
@@ -180,11 +182,11 @@ def main() -> None:
     thumbs: list[tuple[Path, Image.Image]] = []
     for path in comparison_paths:
         image = Image.open(path).convert("RGB")
-        image.thumbnail((840, 420), Image.Resampling.LANCZOS)
+        image.thumbnail((1100, 440), Image.Resampling.LANCZOS)
         thumbs.append((path, image.copy()))
     pad = 18
     label_h = 28
-    sheet_w = 900
+    sheet_w = 1180
     sheet_h = pad + sum(image.height + label_h + pad for _, image in thumbs)
     sheet = Image.new("RGB", (sheet_w, sheet_h), BG)
     draw = ImageDraw.Draw(sheet)
@@ -197,8 +199,6 @@ def main() -> None:
     sheet_path = output_dir / "contact_sheet.png"
     sheet.save(sheet_path, optimize=True)
 
-    aggregate_a = student_a.get("aggregate_metrics_vs_teacher_binary", {})
-    aggregate_b = student_b.get("aggregate_metrics_vs_teacher_binary", {})
     html_rows = []
     for row in rows:
         rel_img = Path(row["comparison_png"]).relative_to(output_dir)
@@ -207,15 +207,18 @@ def main() -> None:
             f"<td>{html.escape(str(row['case_id']))}</td>"
             f"<td>{html.escape(str(row['bbox']))}</td>"
             f"<td>{row['n_patches']}</td>"
-            f"<td>{fmt(row['student_a_f1'])}</td><td>{fmt(row['student_a_precision'])}</td>"
-            f"<td>{fmt(row['student_a_recall'])}</td><td>{fmt(row['student_a_auprc'])}</td>"
-            f"<td>{fmt(row['student_b_f1'])}</td><td>{fmt(row['student_b_precision'])}</td>"
-            f"<td>{fmt(row['student_b_recall'])}</td><td>{fmt(row['student_b_auprc'])}</td>"
+            f"<td>{fmt(row['student_a_f1_vs_auto_context_stage6'])}</td>"
+            f"<td>{fmt(row['student_a_precision_vs_auto_context_stage6'])}</td>"
+            f"<td>{fmt(row['student_a_recall_vs_auto_context_stage6'])}</td>"
+            f"<td>{fmt(row['student_b_f1_vs_auto_context_stage6'])}</td>"
+            f"<td>{fmt(row['student_b_precision_vs_auto_context_stage6'])}</td>"
+            f"<td>{fmt(row['student_b_recall_vs_auto_context_stage6'])}</td>"
             f"<td><a href=\"{html.escape(str(rel_img))}\">comparison</a></td>"
             "</tr>"
         )
+
     html_doc = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Distilled student inference comparison</title>
+<html><head><meta charset="utf-8"><title>TRIDENT vs distilled foreground comparison</title>
 <style>
 body {{ font-family: system-ui, -apple-system, sans-serif; margin: 24px; color: #1f2328; }}
 table {{ border-collapse: collapse; font-size: 13px; }}
@@ -224,15 +227,9 @@ th {{ background: #f6f8fa; }}
 img {{ max-width: 100%; height: auto; border: 1px solid #d0d7de; }}
 .note {{ color: #57606a; max-width: 980px; }}
 </style></head><body>
-<h1>Distilled Student Inference Comparison</h1>
-<p class="note">Reference labels are synthetic Stage 6 grids derived from TRIDENT reviewer masks. The packaged script names copied reference files <code>qwen_*</code>, but no VLM calls were made in this run.</p>
-<h2>Aggregate Metrics vs Reference Mask Labels</h2>
-<table><tr><th>model</th><th>n_eval</th><th>F1</th><th>precision</th><th>recall</th><th>AUPRC</th><th>AUROC</th></tr>
-<tr><td>{html.escape(args.student_a_name)}</td><td>{aggregate_a.get('n_eval','')}</td><td>{fmt(aggregate_a.get('f1'))}</td><td>{fmt(aggregate_a.get('precision'))}</td><td>{fmt(aggregate_a.get('recall'))}</td><td>{fmt(aggregate_a.get('auprc'))}</td><td>{fmt(aggregate_a.get('auroc'))}</td></tr>
-<tr><td>{html.escape(args.student_b_name)}</td><td>{aggregate_b.get('n_eval','')}</td><td>{fmt(aggregate_b.get('f1'))}</td><td>{fmt(aggregate_b.get('precision'))}</td><td>{fmt(aggregate_b.get('recall'))}</td><td>{fmt(aggregate_b.get('auprc'))}</td><td>{fmt(aggregate_b.get('auroc'))}</td></tr>
-</table>
-<h2>By Bbox</h2>
-<table><tr><th>case</th><th>bbox</th><th>patches</th><th>student A F1</th><th>student A P</th><th>student A R</th><th>student A AUPRC</th><th>student B F1</th><th>student B P</th><th>student B R</th><th>student B AUPRC</th><th>image</th></tr>
+<h1>TRIDENT vs Distilled Foreground Comparison</h1>
+<p class="note">Metrics compare each student to the existing auto-context Stage 6 labels, not to TRIDENT. Use the images for TRIDENT-vs-student visual inspection.</p>
+<table><tr><th>case</th><th>bbox</th><th>patches</th><th>A F1</th><th>A P</th><th>A R</th><th>B F1</th><th>B P</th><th>B R</th><th>image</th></tr>
 {''.join(html_rows)}
 </table>
 <h2>Contact Sheet</h2>
@@ -240,6 +237,7 @@ img {{ max-width: 100%; height: auto; border: 1px solid #d0d7de; }}
 </body></html>
 """
     (output_dir / "index.html").write_text(html_doc)
+
     print(f"wrote {len(comparison_paths)} comparison PNGs")
     print(sheet_path)
     print(output_dir / "index.html")
