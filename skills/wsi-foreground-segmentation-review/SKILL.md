@@ -255,10 +255,15 @@ python run_vlm_reviewer_batch.py \
   --backend openrouter \
   --model google/gemini-3-flash-preview \
   --reasoning-effort high \
-  --max-concurrent-requests 2 \
+  --max-concurrent-requests 16 \
   --qc-precision-threshold 0.9 \
   --qc-recall-threshold 0.9
 ```
+
+For OpenRouter foreground review, use `--max-concurrent-requests 12` to `16`
+as the stable range for small to medium batches. The PER-197 20-mask KMeans
+review completed 20/20 at concurrency 16 with no retries or rate-limit errors.
+Drop concurrency if 429, quota, or timeout errors appear.
 
 If a run already used `--stage2-force-read-l0` and the saved Stage 3 bbox crops
 are high-resolution enough for visual review, skip the exporter and point
@@ -340,6 +345,8 @@ Default QC policy:
 
 - Use OpenRouter `google/gemini-3-flash-preview` with reasoning effort `high`.
 - Use `prompts/calibration_reviewer.txt` unless the user explicitly asks for a narrative subjective review.
+- Use `--max-concurrent-requests 12` to `16` for OpenRouter foreground review
+  unless rate limits or quota errors require backing off.
 - `precision_pass = precision > --qc-precision-threshold`.
 - `recall_pass = recall > --qc-recall-threshold`.
 - `overall_pass = precision_pass and recall_pass`.
