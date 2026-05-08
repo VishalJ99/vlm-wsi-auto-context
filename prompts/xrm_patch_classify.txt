@@ -1,0 +1,18 @@
+Classify this x-ray microscopy patch using the labeled examples and criteria below.
+
+{CLASS_DEFS}
+
+Respond with ONLY a JSON object (no other text):
+{{"class": "<label>", "quality": "<Sharp|Somewhat Blurred|Out of Focus|NA>", "reasoning": "<brief explanation>"}}
+
+Quality score criteria:
+- Sharp: Sample boundaries and internal contrast are crisp enough to decide foreground/background.
+- Somewhat Blurred: Foreground/background is still identifiable but edges or internal contrast are weak.
+- Out of Focus: The patch is dominated by indistinct blur, reconstruction artifact, or unusable contrast.
+- NA: Use only when quality is not meaningful for this class.
+
+Examples:
+{EXAMPLES_BLOCK}
+
+Now classify this patch:
+{QUERY_IMAGE}

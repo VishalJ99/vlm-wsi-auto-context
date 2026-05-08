@@ -1,0 +1,6 @@
+{
+  "tissue": "Foreground sample/tissue material in an x-ray microscopy slice, including dense or textured biological material and sample support immediately contiguous with the specimen.",
+  "background": "Empty air, black/flat background, holder-only region, or reconstruction space with no tissue/sample material.",
+  "paraffin_mounting_medium": "Non-target mounting/support material when visually separable from tissue/sample material in the XRM slice.",
+  "pen_ink_marks": "Non-biological marks or annotations. This class is usually absent for XRM slices."
+}

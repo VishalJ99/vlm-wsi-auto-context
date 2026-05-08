@@ -1,0 +1,3 @@
+Look at this x-ray microscopy crop from a 2D slice of a 3D tissue sample. Point to regions clearly belonging to the following categories:
+{class_definitions}
+{max_items_instruction}The answer should follow the json format: [{{"{point_key}": <point>, "label": <label1>}}, ...]. The points are in [{point_order_desc}] format normalized to 0-1000.

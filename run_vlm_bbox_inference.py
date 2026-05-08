@@ -3142,7 +3142,7 @@ def build_parser() -> argparse.ArgumentParser:
     io.add_argument("--rerun-from", help="Stage6 output dir or patch PNG to reuse metadata")
     io.add_argument(
         "--wsi-reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default="cucim",
         help="WSI reader backend for patch extraction (default: cucim).",
     )

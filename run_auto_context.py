@@ -3204,7 +3204,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--allstage-wsi-reader",
         "--allstage-reader",
         dest="allstage_wsi_reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default=None,
         help=(
             "Convenience override for Stage 1/2/5/6 WSI readers. "
@@ -3273,7 +3273,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--stage1-wsi-reader",
         "--stage1-reader",
         dest="stage1_wsi_reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default="auto",
         help="WSI reader backend for Stage 1 thumbnail extraction (default: auto).",
     )
@@ -3342,7 +3342,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--stage2-wsi-reader",
         "--stage2-reader",
         dest="stage2_wsi_reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default="auto",
         help="WSI reader backend for Stage 2 bbox extraction (default: auto).",
     )
@@ -3401,7 +3401,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--stage5-wsi-reader",
         "--stage5-reader",
         dest="stage5_wsi_reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default="auto",
         help="WSI reader backend for Stage 5 patch extraction (default: auto).",
     )
@@ -3528,7 +3528,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--stage6-wsi-reader",
         "--stage6-reader",
         dest="stage6_wsi_reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default="auto",
         help="WSI reader backend for Stage 6 patch extraction (default: auto).",
     )

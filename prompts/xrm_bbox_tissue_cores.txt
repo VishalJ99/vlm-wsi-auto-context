@@ -1,0 +1,12 @@
+You are looking at a 2D x-ray microscopy slice from a 3D tissue sample.
+
+Locate each separate contiguous tissue/sample core visible in this slice. Ignore empty air/background, holder edges, ring artifacts, and reconstruction artifacts unless they are part of the sample.
+
+Output a JSON array in normalized 0-1000 coordinates:
+[{"bbox_2d": [x_min, y_min, x_max, y_max], "label": "sample"}]
+
+Rules:
+- Use [x_min, y_min, x_max, y_max].
+- One box per separate tissue/sample core.
+- Do not describe light microscopy stains, glass background, nuclei, or slide artifacts.
+- Output JSON only.

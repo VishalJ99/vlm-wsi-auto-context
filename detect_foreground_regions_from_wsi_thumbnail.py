@@ -1370,7 +1370,7 @@ Examples:
     )
     parser.add_argument(
         "--wsi-reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default="cucim",
         help="WSI reader backend (default: cucim). Use openslide for .ndpi compatibility.",
     )

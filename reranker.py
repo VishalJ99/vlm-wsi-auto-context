@@ -776,7 +776,7 @@ Examples:
     )
     extract_group.add_argument(
         "--wsi-reader",
-        choices=["auto", "openslide", "cucim"],
+        choices=["auto", "openslide", "cucim", "image"],
         default="cucim",
         help="WSI reader backend for patch extraction (default: cucim).",
     )
