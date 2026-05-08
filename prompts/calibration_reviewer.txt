@@ -12,7 +12,7 @@ You are a Histopathology Image Analyst. Your task is to estimate two percentages
 
 - Input 2: Segmentation Mask Overlay (Foreground patches).
 
-Requirement: Compare the spatial boundaries of the mask against the biological structures in the source image.
+Requirement: Compare the spatial boundaries of the mask against the biological structures in the source image. Green overlay pixels are predicted foreground; uncolored pixels are predicted background.
 
 </multimodal_context>
 
