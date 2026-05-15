@@ -464,6 +464,10 @@ def _case_display(row: dict[str, str]) -> str:
     )
 
 
+def _safe_slug(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower()
+
+
 def build_detection_tasks(args: argparse.Namespace) -> list[dict[str, Any]]:
     output_root = args.output_root.resolve()
     rows = _selected_rows(args.manifest.resolve(), args.indices)
@@ -617,7 +621,8 @@ def run_feedback_redetect(args: argparse.Namespace) -> int:
     review = _load_review_result(output_root, args.index)
     reviewer_feedback = _review_feedback_text(review)
     case_slug = f"{int(row['index']):03d}_{Path(row['wsi_path']).stem}"
-    out_dir = output_root / "feedback_redetect" / case_slug
+    run_label = args.run_label or _safe_slug(args.model)
+    out_dir = output_root / "feedback_redetect" / case_slug / run_label
     out_dir.mkdir(parents=True, exist_ok=True)
 
     prompt_text = (
@@ -990,6 +995,7 @@ python scripts/stage1_detection_review_pilot.py run-feedback-redetect \\
   --output-root {args.output_root.resolve()} \\
   --index {args.index} \\
   --model {args.model} \\
+  --run-label {args.run_label or _safe_slug(args.model)} \\
   --temperature {args.temperature}
 
 Outputs:
@@ -1041,6 +1047,11 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     feedback.add_argument("--index", type=int, default=70)
     feedback.add_argument("--model", default=DEFAULT_MODEL)
+    feedback.add_argument(
+        "--run-label",
+        default=None,
+        help="Optional subdirectory label for comparing multiple models on the same case.",
+    )
     feedback.add_argument("--api-base", default=None)
     feedback.add_argument("--api-key", default=None)
     feedback.add_argument("--temperature", type=float, default=0.0)
