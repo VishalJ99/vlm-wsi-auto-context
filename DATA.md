@@ -4,6 +4,7 @@
 - `/data2/vj724/multistain/pilot_data/TOL_BLUE/tol_blue_patient_054_slide_004.svs`: challenging Tol Blue pilot WSI used for PER-188 foreground auto-context runs.
 - `/data2/vj724/vlm-wsi-auto-context/runs/auto_context_pilot/`: ignored local output root for PER-188 auto-context foreground pilot runs; each run directory has `reproduction.txt`.
 - `/data2/vj724/vlm-wsi-auto-context/runs/auto_context_reviewer_inputs/`: ignored local output root for high-resolution Stage 7 auto-context reviewer inputs exported from WSI-level coordinates; each run directory has `reproduction.txt`.
+- `/data2/vj724/vlm-wsi-auto-context/runs/stage1_detector_pilot_v1/`: ignored local output root for the PER-188 Stage 1 detector pilot control plane; contains the balanced 100-WSI worklist, the 20-WSI manual review gate, generated Stage 1 and guard command files, and `reproduction.txt`.
 - `/data2/vj724/vlm-wsi-auto-context/runs/trident_reviewer_inputs/`: ignored local output root for TRIDENT contour/GeoJSON reviewer inputs exported as Stage3-compatible crop/mask/overlay directories, preferably per Stage 1 VLM tissue-core bbox; each run directory has `reproduction.txt`.
 - `/data2/vj724/vlm-wsi-auto-context/runs/reviewer_pilot/`: ignored local output root for PER-188 foreground reviewer pilot attempts; each batch directory should have `reproduction.txt`.
 - `/data2/vj724/hf_cache/`: local Hugging Face cache for Qwen/Qwen3-VL-8B-Instruct-FP8 vLLM serving; see `/data2/vj724/hf_cache/reproduction.txt`.

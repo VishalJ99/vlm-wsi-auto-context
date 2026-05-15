@@ -81,6 +81,21 @@ python vlm_reviewer.py --crop <png> --mask <png> [options]
 
 ## Supporting Utility
 
+### `scripts/stage1_detector_pilot_control.py`
+Builds and operates the PER-188 Stage 1 detector pilot control plane:
+
+```bash
+python scripts/stage1_detector_pilot_control.py build-worklist
+bash runs/stage1_detector_pilot_v1/commands/run_stage1_pilot.sh
+python scripts/stage1_detector_pilot_control.py export-review-packet \
+  --worklist-csv runs/stage1_detector_pilot_v1/worklists/manual_review_20.csv \
+  --output-root runs/stage1_detector_pilot_v1
+```
+
+After manual review passes, the same script can build synthetic guard cases by
+dropping one detector bbox, dry-run the guard request list, run the guard VLM,
+and summarize the expected-missing-core results.
+
 ### `materialize_stage1_from_xml.py`
 Converts XML-derived detections into Stage 1-compatible outputs for downstream method use.
 
