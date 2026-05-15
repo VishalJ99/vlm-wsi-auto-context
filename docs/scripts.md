@@ -96,6 +96,21 @@ After manual review passes, the same script can build synthetic guard cases by
 dropping one detector bbox, dry-run the guard request list, run the guard VLM,
 and summarize the expected-missing-core results.
 
+### `scripts/stage1_detection_review_pilot.py`
+Runs a focused VLM smoke test over existing Stage 1 thumbnail detections. The
+reviewer sees the source thumbnail plus Stage 1 overlay and returns slide-level
+flags plus per-bbox localization grades:
+
+```bash
+PYTHONPATH=/data2/vj724/python_deps/openai_py310:$PYTHONPATH \
+python scripts/stage1_detection_review_pilot.py run-detection-review
+```
+
+Outputs are written under
+`runs/stage1_detector_pilot_v1/stage1_detection_review_v1/`, including raw
+JSONL results, slide/bbox CSV summaries, a PDF visual packet, and
+`reproduction.txt`.
+
 ### `materialize_stage1_from_xml.py`
 Converts XML-derived detections into Stage 1-compatible outputs for downstream method use.
 
