@@ -301,7 +301,7 @@ def _write_stage1_command(
     run_id: str,
     model: str,
     max_dim: int,
-    api_base: str,
+    openrouter_url: str,
 ) -> None:
     cmd = [
         "python",
@@ -318,8 +318,8 @@ def _write_stage1_command(
         model,
         "--stage1-max-dim",
         str(max_dim),
-        "--stage1-api-base",
-        api_base,
+        "--stage1-openrouter-url",
+        openrouter_url,
     ]
     _ensure_parent(path)
     path.write_text(
@@ -390,7 +390,7 @@ def cmd_build_worklist(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         model=args.stage1_model,
         max_dim=args.stage1_max_dim,
-        api_base=args.stage1_api_base,
+        openrouter_url=args.stage1_openrouter_url,
     )
 
     summary = {
@@ -404,7 +404,7 @@ def cmd_build_worklist(args: argparse.Namespace) -> int:
         "run_id": args.run_id,
         "stage1_model": args.stage1_model,
         "stage1_max_dim": args.stage1_max_dim,
-        "stage1_api_base": args.stage1_api_base,
+        "stage1_openrouter_url": args.stage1_openrouter_url,
         "required_stains": list(args.stains),
         "seed": args.seed,
         "n_groups": args.n_groups,
@@ -438,7 +438,7 @@ def _write_reproduction(path: Path, summary: dict[str, Any]) -> None:
         f"--seed {summary['seed']} "
         f"--stage1-model {shlex.quote(summary['stage1_model'])} "
         f"--stage1-max-dim {summary['stage1_max_dim']} "
-        f"--stage1-api-base {shlex.quote(summary['stage1_api_base'])}"
+        f"--stage1-openrouter-url {shlex.quote(summary['stage1_openrouter_url'])}"
     )
     stains = " ".join(shlex.quote(stain) for stain in summary["required_stains"])
     text = f"""Stage 1 Detector Pilot Control Plane V1
@@ -454,7 +454,7 @@ Inputs
 - Required stains: {', '.join(summary['required_stains'])}
 - Stage 1 model: {summary['stage1_model']}
 - Stage 1 max thumbnail dimension: {summary['stage1_max_dim']}
-- Stage 1 API base: {summary['stage1_api_base']}
+- Stage 1 OpenRouter URL: {summary['stage1_openrouter_url']}
 - Seed: {summary['seed']}
 - Pilot groups: {summary['n_groups']}
 - Manual review groups: {summary['manual_review_groups']}
@@ -983,7 +983,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--seed", type=int, default=42)
     build.add_argument("--stage1-model", default="google/gemini-3-flash-preview")
     build.add_argument("--stage1-max-dim", type=int, default=2048)
-    build.add_argument("--stage1-api-base", default="https://openrouter.ai/api/v1")
+    build.add_argument("--stage1-openrouter-url", default="https://openrouter.ai/api/v1")
     build.set_defaults(func=cmd_build_worklist)
 
     review = subparsers.add_parser("export-review-packet", help="Export a small manual review packet.")

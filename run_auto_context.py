@@ -1652,6 +1652,8 @@ def build_stage1_command(args: argparse.Namespace, wsi_path: str, wsi_reader: st
         args.stage1_backend,
         "--model",
         args.stage1_model,
+        "--max-dim",
+        str(args.stage1_max_dim),
         "--openrouter-url",
         args.stage1_openrouter_url,
         "--vllm-url",
@@ -3227,6 +3229,7 @@ def create_parser() -> argparse.ArgumentParser:
     # Stage 1
     parser.add_argument("--stage1-backend", choices=["openrouter", "vllm", "vertex"], default="openrouter")
     parser.add_argument("--stage1-model", type=str, default="google/gemini-3-flash-preview")
+    parser.add_argument("--stage1-max-dim", type=int, default=1024)
     parser.add_argument("--stage1-openrouter-url", type=str, default="https://openrouter.ai/api/v1")
     parser.add_argument("--stage1-vllm-url", type=str, default="http://localhost:8000/v1")
     parser.add_argument("--stage1-api-key", type=str, default=None)
