@@ -255,7 +255,7 @@ def _extract_json_payload(text: str) -> Any:
         except json.JSONDecodeError:
             continue
         if _is_detection_payload(payload):
-            if isinstance(payload, dict) and any(key in payload for key in ("box_2d", "bbox_2d", "bbox")):
+            if isinstance(payload, dict) and _detection_coords(payload) is not None:
                 if len(recovered) > 1:
                     return recovered
             return payload
@@ -264,10 +264,18 @@ def _extract_json_payload(text: str) -> Any:
     return {"raw_text": text}
 
 
+def _detection_coords(item: dict[str, Any]) -> Any:
+    for key, value in item.items():
+        normalized_key = re.sub(r"\s+", "", str(key)).lower()
+        if normalized_key in {"box_2d", "bbox_2d", "bbox"}:
+            return value
+    return None
+
+
 def _is_detection_payload(payload: Any) -> bool:
     if isinstance(payload, dict):
         return bool(
-            any(key in payload for key in ("box_2d", "bbox_2d", "bbox"))
+            _detection_coords(payload) is not None
             or isinstance(payload.get("detected_regions"), list)
             or isinstance(payload.get("bboxes"), list)
             or isinstance(payload.get("boxes"), list)
@@ -293,7 +301,7 @@ def _recover_detection_objects(text: str) -> list[dict[str, Any]]:
             idx = start + 1
             continue
         idx = start + end
-        if isinstance(payload, dict) and any(key in payload for key in ("box_2d", "bbox_2d", "bbox")):
+        if isinstance(payload, dict) and _detection_coords(payload) is not None:
             objects.append(payload)
     return objects
 
@@ -396,7 +404,7 @@ def _review_feedback_text(review: dict[str, Any]) -> str:
 
 def _normalised_detection_items(payload: Any, thumbnail_size: tuple[int, int]) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
-        if any(key in payload for key in ("box_2d", "bbox_2d", "bbox")):
+        if _detection_coords(payload) is not None:
             items = [payload]
         elif isinstance(payload.get("detected_regions"), list):
             items = payload["detected_regions"]
@@ -416,7 +424,7 @@ def _normalised_detection_items(payload: Any, thumbnail_size: tuple[int, int]) -
     for idx, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
-        coords = item.get("box_2d") or item.get("bbox_2d") or item.get("bbox")
+        coords = _detection_coords(item)
         if not isinstance(coords, list) or len(coords) != 4:
             continue
         try:
