@@ -134,6 +134,23 @@ Rules:
 - Output JSON only. Do not include prose.
 """
 
+FIRST_PASS_DETECT_PROMPT = """\
+You are looking at a whole slide image containing tissue core biopsies at low magnification.
+
+First, count how many separate tissue cores you see in the image.
+Then, draw a bounding box around each tissue core.
+
+Output a JSON array of bounding boxes in normalized 0-1000 coordinates:
+[{"box_2d": [y_min, x_min, y_max, x_max], "label": "tissue_1"}]
+
+Rules:
+- Each tissue core or distinct tissue fragment must have its own separate bounding box.
+- Do not merge multiple separate cores into one box.
+- Include faint tissue fragments if they have tissue-like color or structure.
+- Ignore glass edges, pen marks, bubbles, dust, debris, and mounting-media smudges.
+- Output JSON only. Do not include prose.
+"""
+
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -214,24 +231,71 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 def _extract_json_payload(text: str) -> Any:
     text = text.strip()
     try:
-        return json.loads(text)
+        payload = json.loads(text)
+        if _is_detection_payload(payload):
+            return payload
     except json.JSONDecodeError:
         pass
-    fenced = re.search(r"```(?:json)?\s*([\[{].*?[\]}])\s*```", text, flags=re.DOTALL)
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
     if fenced:
         try:
-            return json.loads(fenced.group(1))
+            payload = json.loads(fenced.group(1))
+            if _is_detection_payload(payload):
+                return payload
         except json.JSONDecodeError:
             pass
+    recovered = _recover_detection_objects(text)
+    if len(recovered) > 1:
+        return recovered
     decoder = json.JSONDecoder()
     starts = [idx for idx, char in enumerate(text) if char in "[{"]
     for idx in starts:
         try:
             payload, _ = decoder.raw_decode(text[idx:])
-            return payload
         except json.JSONDecodeError:
             continue
+        if _is_detection_payload(payload):
+            if isinstance(payload, dict) and any(key in payload for key in ("box_2d", "bbox_2d", "bbox")):
+                if len(recovered) > 1:
+                    return recovered
+            return payload
+    if recovered:
+        return recovered
     return {"raw_text": text}
+
+
+def _is_detection_payload(payload: Any) -> bool:
+    if isinstance(payload, dict):
+        return bool(
+            any(key in payload for key in ("box_2d", "bbox_2d", "bbox"))
+            or isinstance(payload.get("detected_regions"), list)
+            or isinstance(payload.get("bboxes"), list)
+            or isinstance(payload.get("boxes"), list)
+            or "raw_text" in payload
+        )
+    if isinstance(payload, list):
+        return len(payload) == 0 or any(isinstance(item, dict) for item in payload)
+    return False
+
+
+def _recover_detection_objects(text: str) -> list[dict[str, Any]]:
+    """Recover complete detection objects from malformed or truncated JSON arrays."""
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    idx = 0
+    while idx < len(text):
+        start = text.find("{", idx)
+        if start < 0:
+            break
+        try:
+            payload, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        idx = start + end
+        if isinstance(payload, dict) and any(key in payload for key in ("box_2d", "bbox_2d", "bbox")):
+            objects.append(payload)
+    return objects
 
 
 def _api_settings(args: argparse.Namespace) -> tuple[str, str]:
@@ -332,7 +396,9 @@ def _review_feedback_text(review: dict[str, Any]) -> str:
 
 def _normalised_detection_items(payload: Any, thumbnail_size: tuple[int, int]) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
-        if isinstance(payload.get("detected_regions"), list):
+        if any(key in payload for key in ("box_2d", "bbox_2d", "bbox")):
+            items = [payload]
+        elif isinstance(payload.get("detected_regions"), list):
             items = payload["detected_regions"]
         elif isinstance(payload.get("bboxes"), list):
             items = payload["bboxes"]
@@ -354,25 +420,82 @@ def _normalised_detection_items(payload: Any, thumbnail_size: tuple[int, int]) -
         if not isinstance(coords, list) or len(coords) != 4:
             continue
         try:
-            y1, x1, y2, x2 = [float(value) for value in coords]
+            raw_coords = [float(value) for value in coords]
         except (TypeError, ValueError):
             continue
-        y1, y2 = sorted((max(0.0, min(1000.0, y1)), max(0.0, min(1000.0, y2))))
-        x1, x2 = sorted((max(0.0, min(1000.0, x1)), max(0.0, min(1000.0, x2))))
-        bbox_thumbnail = [
-            round(x1 / 1000.0 * width),
-            round(y1 / 1000.0 * height),
-            round(x2 / 1000.0 * width),
-            round(y2 / 1000.0 * height),
-        ]
+        bbox_thumbnail, normalized_box, interpretation, warnings = _parse_detection_coords(raw_coords, thumbnail_size)
         detections.append(
             {
                 "label": str(item.get("label") or f"tissue_{idx}"),
-                "box_2d_yxyx_normalized": [round(y1), round(x1), round(y2), round(x2)],
+                "raw_box_2d": [round(value, 3) for value in raw_coords],
+                "coordinate_interpretation": interpretation,
+                "parser_warnings": warnings,
+                "box_2d_yxyx_normalized": normalized_box,
                 "bbox_thumbnail": bbox_thumbnail,
             }
         )
     return detections
+
+
+def _parse_detection_coords(
+    raw_coords: list[float],
+    thumbnail_size: tuple[int, int],
+) -> tuple[list[int], list[int], str, list[str]]:
+    width, height = thumbnail_size
+    warnings: list[str] = []
+
+    def pixel_bbox(x1: float, y1: float, x2: float, y2: float) -> list[int]:
+        sx1, sx2 = sorted((max(0.0, min(float(width), x1)), max(0.0, min(float(width), x2))))
+        sy1, sy2 = sorted((max(0.0, min(float(height), y1)), max(0.0, min(float(height), y2))))
+        return [round(sx1), round(sy1), round(sx2), round(sy2)]
+
+    def normalized_from_pixel(bbox: list[int]) -> list[int]:
+        x1, y1, x2, y2 = bbox
+        return [
+            round(y1 / float(max(1, height)) * 1000.0),
+            round(x1 / float(max(1, width)) * 1000.0),
+            round(y2 / float(max(1, height)) * 1000.0),
+            round(x2 / float(max(1, width)) * 1000.0),
+        ]
+
+    y1, x1, y2, x2 = raw_coords
+    if all(0.0 <= value <= 1000.0 for value in raw_coords):
+        cy1, cy2 = sorted((max(0.0, min(1000.0, y1)), max(0.0, min(1000.0, y2))))
+        cx1, cx2 = sorted((max(0.0, min(1000.0, x1)), max(0.0, min(1000.0, x2))))
+        if [cy1, cx1, cy2, cx2] != raw_coords:
+            warnings.append("coords_sorted_or_clipped")
+        bbox = [
+            round(cx1 / 1000.0 * width),
+            round(cy1 / 1000.0 * height),
+            round(cx2 / 1000.0 * width),
+            round(cy2 / 1000.0 * height),
+        ]
+        normalized = [round(cy1), round(cx1), round(cy2), round(cx2)]
+        return bbox, normalized, "normalized_yxyx", warnings
+
+    px1, py1, px2, py2 = raw_coords
+    if 0 <= px1 <= width and 0 <= px2 <= width and 0 <= py1 <= height and 0 <= py2 <= height:
+        bbox = pixel_bbox(px1, py1, px2, py2)
+        warnings.append("interpreted_as_pixel_xyxy_outside_prompt_schema")
+        return bbox, normalized_from_pixel(bbox), "pixel_xyxy", warnings
+
+    if 0 <= y1 <= height and 0 <= y2 <= height and 0 <= x1 <= width and 0 <= x2 <= width:
+        bbox = pixel_bbox(x1, y1, x2, y2)
+        warnings.append("interpreted_as_pixel_yxyx_outside_prompt_schema")
+        return bbox, normalized_from_pixel(bbox), "pixel_yxyx", warnings
+
+    cy1, cy2 = sorted((max(0.0, min(1000.0, y1)), max(0.0, min(1000.0, y2))))
+    cx1, cx2 = sorted((max(0.0, min(1000.0, x1)), max(0.0, min(1000.0, x2))))
+    bbox = [
+        round(cx1 / 1000.0 * width),
+        round(cy1 / 1000.0 * height),
+        round(cx2 / 1000.0 * width),
+        round(cy2 / 1000.0 * height),
+    ]
+    if bbox[0] == bbox[2] or bbox[1] == bbox[3]:
+        warnings.append("degenerate_after_clipping")
+    warnings.append("coords_outside_0_1000_clipped_as_normalized_yxyx")
+    return bbox, [round(cy1), round(cx1), round(cy2), round(cx2)], "normalized_yxyx_clipped", warnings
 
 
 def _draw_redetect_overlay(thumbnail_path: Path, detections: list[dict[str, Any]], output_path: Path) -> None:
@@ -429,6 +552,146 @@ def _write_feedback_redetect_pdf(output_dir: Path, record: dict[str, Any]) -> No
         y = _draw_wrapped(draw, (60, y), json.dumps(detection, sort_keys=True), small_font, 160, "#111111")
     pdf_path = output_dir / "feedback_redetect_report.pdf"
     page.save(pdf_path, "PDF", resolution=150)
+
+
+def _chat_with_images(
+    *,
+    model: str,
+    prompt_text: str,
+    image_paths: list[Path],
+    temperature: float,
+    max_tokens: int,
+    base_url: str,
+    api_key: str,
+) -> tuple[str, dict[str, Any], str]:
+    from openai import OpenAI
+
+    client = OpenAI(base_url=base_url, api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt_text}]
+                + [
+                    {"type": "image_url", "image_url": {"url": _image_to_data_url(path)}}
+                    for path in image_paths
+                ],
+            }
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    raw = response.choices[0].message.content or ""
+    usage = response.usage.model_dump() if getattr(response, "usage", None) else {}
+    response_model = getattr(response, "model", "")
+    return raw, usage, response_model
+
+
+def _detections_as_bboxes(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "label": detection.get("label", f"tissue_{idx}"),
+            "bbox_thumbnail": detection.get("bbox_thumbnail", [0, 0, 0, 0]),
+            "synthetic": False,
+            "synthetic_source": "",
+        }
+        for idx, detection in enumerate(detections, start=1)
+    ]
+
+
+def _review_feedback_text_from_parsed(parsed: dict[str, Any]) -> str:
+    return _review_feedback_text({"parsed_response": parsed})
+
+
+def _raw_excerpt(value: Any, limit: int = 1800) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n... [truncated in PDF; full raw response is in JSON]"
+
+
+def _write_model_loop_pdf(output_dir: Path, record: dict[str, Any]) -> None:
+    page = Image.new("RGB", (2200, 3500), "white")
+    draw = ImageDraw.Draw(page)
+    title_font = _font(30)
+    body_font = _font(18)
+    small_font = _font(15)
+    y = 35
+    draw.text((45, y), f"Model loop: {record['model']}", font=title_font, fill="black")
+    y += 44
+    draw.text((45, y), record["case_display"], font=body_font, fill="#222222")
+    y += 34
+    slide = _slide_review(record.get("review_parsed", {}))
+    draw.text(
+        (45, y),
+        f"first_pass={len(record['first_pass_detections'])} boxes | "
+        f"review missed={slide.get('missed_tissue_core')} needs_refinement={slide.get('needs_refinement')} | "
+        f"feedback_redetect={len(record['feedback_redetect_detections'])} boxes",
+        font=body_font,
+        fill="#111111",
+    )
+    y += 46
+
+    cards = [
+        (
+            "Source thumbnail",
+            Path(record["thumbnail_path"]),
+            "Original input.",
+        ),
+        (
+            "First-pass detection",
+            Path(record["first_pass_overlay_path"]),
+            record.get("first_pass_summary", ""),
+        ),
+        (
+            "Same-model review",
+            Path(record["first_pass_overlay_path"]),
+            slide.get("reasoning", ""),
+        ),
+        (
+            "Feedback redetection",
+            Path(record["feedback_redetect_overlay_path"]),
+            record.get("feedback_redetect_summary", ""),
+        ),
+    ]
+    card_w, card_h = 1030, 610
+    image_w, image_h = 940, 340
+    for idx, (title, image_path, summary) in enumerate(cards):
+        x = 45 + (idx % 2) * (card_w + 50)
+        yy = y + (idx // 2) * (card_h + 45)
+        draw.rectangle((x, yy, x + card_w, yy + card_h), outline="#bbbbbb", width=2)
+        draw.text((x + 22, yy + 18), title, font=body_font, fill="black")
+        image = _thumb(image_path, (image_w, image_h))
+        page.paste(image, (x + 45, yy + 55))
+        ty = yy + 415
+        for line in textwrap.wrap(str(summary), 112):
+            draw.text((x + 22, ty), line, font=small_font, fill="#111111")
+            ty += 20
+
+    y = y + 2 * (card_h + 45) + 25
+    draw.text((45, y), "Parsed outputs", font=body_font, fill="black")
+    y += 30
+    parsed_text = (
+        "First pass: "
+        + _raw_excerpt(json.dumps(record["first_pass_detections"], sort_keys=True), 1800)
+        + "\nFeedback redetect: "
+        + _raw_excerpt(json.dumps(record["feedback_redetect_detections"], sort_keys=True), 1800)
+    )
+    y = _draw_wrapped(draw, (45, y), parsed_text, small_font, 180, "#111111")
+    y += 20
+    draw.text((45, y), "Raw model outputs", font=body_font, fill="black")
+    y += 30
+    raw_text = (
+        "First-pass raw:\n"
+        + _raw_excerpt(record.get("first_pass_raw", ""), 1300)
+        + "\n\nSame-model review raw:\n"
+        + _raw_excerpt(record.get("review_raw", ""), 1300)
+        + "\n\nFeedback-redetect raw:\n"
+        + _raw_excerpt(record.get("feedback_redetect_raw", ""), 1300)
+    )
+    _draw_wrapped(draw, (45, y), raw_text, small_font, 180, "#111111")
+    page.save(output_dir / "model_loop_report.pdf", "PDF", resolution=150)
 
 
 def _bbox_text(bboxes: list[dict[str, Any]], thumbnail_size: tuple[int, int]) -> str:
@@ -730,6 +993,470 @@ def run_feedback_redetect(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_model_loop(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    row = _selected_rows(args.manifest.resolve(), [args.index])[0]
+    thumbnail_path = Path(row["thumbnail_path"])
+    if not thumbnail_path.exists():
+        raise SystemExit(f"Thumbnail does not exist: {thumbnail_path}")
+    with Image.open(thumbnail_path) as image:
+        thumbnail_size = image.size
+
+    case_slug = f"{int(row['index']):03d}_{Path(row['wsi_path']).stem}"
+    run_label = args.run_label or _safe_slug(args.model)
+    out_dir = output_root / "model_loops" / case_slug / run_label
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    first_prompt = FIRST_PASS_DETECT_PROMPT + "\n\nCase:\n" + _case_display(row)
+    first_task = {
+        "task_id": f"model_loop_first_detect_{int(row['index']):03d}",
+        "model": args.model,
+        "case_display": _case_display(row),
+        "thumbnail_path": str(thumbnail_path),
+        "prompt": first_prompt,
+        "created_at": _timestamp(),
+    }
+    _write_json(out_dir / "first_pass_task.json", first_task)
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "output_dir": str(out_dir)}, indent=2))
+        return 0
+    base_url, api_key = _api_settings(args)
+
+    record: dict[str, Any] = {
+        "case_display": _case_display(row),
+        "model": args.model,
+        "run_label": run_label,
+        "thumbnail_path": str(thumbnail_path),
+        "created_at": _timestamp(),
+        "errors": [],
+    }
+    try:
+        first_raw, first_usage, first_response_model = _chat_with_images(
+            model=args.model,
+            prompt_text=first_prompt,
+            image_paths=[thumbnail_path],
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            base_url=base_url,
+            api_key=api_key,
+        )
+        first_parsed = _extract_json_payload(first_raw)
+        first_detections = _normalised_detection_items(first_parsed, thumbnail_size)
+        first_overlay = out_dir / "first_pass_overlay.png"
+        _draw_redetect_overlay(thumbnail_path, first_detections, first_overlay)
+        _write_json(
+            out_dir / "first_pass_result.json",
+            {
+                "raw_response": first_raw,
+                "parsed_response": first_parsed,
+                "detections": first_detections,
+                "usage": first_usage,
+                "response_model": first_response_model,
+                "overlay_path": str(first_overlay),
+            },
+        )
+        record.update(
+            {
+                "first_pass_raw": first_raw,
+                "first_pass_parsed": first_parsed,
+                "first_pass_detections": first_detections,
+                "first_pass_overlay_path": str(first_overlay),
+                "first_pass_usage": first_usage,
+                "first_pass_response_model": first_response_model,
+                "first_pass_summary": f"{len(first_detections)} first-pass detections.",
+            }
+        )
+
+        first_bboxes = _detections_as_bboxes(first_detections)
+        review_prompt = (
+            DETECTION_REVIEW_PROMPT
+            + "\n\nCase:\n"
+            + _case_display(row)
+            + "\n\nDetected bboxes:\n"
+            + _bbox_text(first_bboxes, thumbnail_size)
+        )
+        _write_json(
+            out_dir / "review_task.json",
+            {
+                "task_id": f"model_loop_review_{int(row['index']):03d}",
+                "model": args.model,
+                "case_display": _case_display(row),
+                "thumbnail_path": str(thumbnail_path),
+                "overlay_path": str(first_overlay),
+                "bbox_text": _bbox_text(first_bboxes, thumbnail_size),
+                "prompt": review_prompt,
+                "created_at": _timestamp(),
+            },
+        )
+        review_raw, review_usage, review_response_model = _chat_with_images(
+            model=args.model,
+            prompt_text=review_prompt,
+            image_paths=[thumbnail_path, first_overlay],
+            temperature=args.temperature,
+            max_tokens=args.review_max_tokens,
+            base_url=base_url,
+            api_key=api_key,
+        )
+        review_parsed = _extract_json_object(review_raw)
+        _write_json(
+            out_dir / "review_result.json",
+            {
+                "raw_response": review_raw,
+                "parsed_response": review_parsed,
+                "usage": review_usage,
+                "response_model": review_response_model,
+            },
+        )
+        record.update(
+            {
+                "review_raw": review_raw,
+                "review_parsed": review_parsed,
+                "review_usage": review_usage,
+                "review_response_model": review_response_model,
+            }
+        )
+
+        reviewer_feedback = _review_feedback_text_from_parsed(review_parsed)
+        redetect_prompt = (
+            FEEDBACK_REDETECT_PROMPT
+            + "\n\nCase:\n"
+            + _case_display(row)
+            + "\n\nPrevious first-pass detected bboxes:\n"
+            + _bbox_text(first_bboxes, thumbnail_size)
+            + "\n\nReviewer feedback from same-model review:\n"
+            + reviewer_feedback
+        )
+        _write_json(
+            out_dir / "feedback_redetect_task.json",
+            {
+                "task_id": f"model_loop_feedback_redetect_{int(row['index']):03d}",
+                "model": args.model,
+                "case_display": _case_display(row),
+                "thumbnail_path": str(thumbnail_path),
+                "first_pass_overlay_path": str(first_overlay),
+                "reviewer_feedback": reviewer_feedback,
+                "prompt": redetect_prompt,
+                "created_at": _timestamp(),
+            },
+        )
+        redetect_raw, redetect_usage, redetect_response_model = _chat_with_images(
+            model=args.model,
+            prompt_text=redetect_prompt,
+            image_paths=[thumbnail_path, first_overlay],
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            base_url=base_url,
+            api_key=api_key,
+        )
+        redetect_parsed = _extract_json_payload(redetect_raw)
+        redetect_detections = _normalised_detection_items(redetect_parsed, thumbnail_size)
+        redetect_overlay = out_dir / "feedback_redetect_overlay.png"
+        _draw_redetect_overlay(thumbnail_path, redetect_detections, redetect_overlay)
+        _write_json(
+            out_dir / "feedback_redetect_result.json",
+            {
+                "raw_response": redetect_raw,
+                "parsed_response": redetect_parsed,
+                "detections": redetect_detections,
+                "usage": redetect_usage,
+                "response_model": redetect_response_model,
+                "overlay_path": str(redetect_overlay),
+            },
+        )
+        record.update(
+            {
+                "reviewer_feedback": reviewer_feedback,
+                "feedback_redetect_raw": redetect_raw,
+                "feedback_redetect_parsed": redetect_parsed,
+                "feedback_redetect_detections": redetect_detections,
+                "feedback_redetect_overlay_path": str(redetect_overlay),
+                "feedback_redetect_usage": redetect_usage,
+                "feedback_redetect_response_model": redetect_response_model,
+                "feedback_redetect_summary": f"{len(redetect_detections)} feedback-redetect detections.",
+            }
+        )
+        _write_model_loop_pdf(out_dir, record)
+        write_model_loop_reproduction(out_dir, args, record)
+    except Exception as exc:
+        record["errors"].append(repr(exc))
+
+    _write_json(out_dir / "model_loop_result.json", record)
+    print(
+        json.dumps(
+            {
+                "output_dir": str(out_dir),
+                "model": args.model,
+                "first_pass_detections": len(record.get("first_pass_detections", [])),
+                "review_missed_tissue_core": _slide_review(record.get("review_parsed", {})).get("missed_tissue_core", ""),
+                "feedback_redetect_detections": len(record.get("feedback_redetect_detections", [])),
+                "errors": record.get("errors", []),
+                "pdf": str(out_dir / "model_loop_report.pdf"),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text())
+
+
+def _refresh_model_loop_record(run_dir: Path) -> dict[str, Any]:
+    record_path = run_dir / "model_loop_result.json"
+    if not record_path.exists():
+        raise SystemExit(f"Missing model loop result: {record_path}")
+    record = _read_json(record_path)
+    thumbnail_path = Path(record["thumbnail_path"])
+    with Image.open(thumbnail_path) as image:
+        thumbnail_size = image.size
+
+    first_result_path = run_dir / "first_pass_result.json"
+    first_result = _read_json(first_result_path) if first_result_path.exists() else {}
+    first_raw = str(record.get("first_pass_raw") or first_result.get("raw_response") or "")
+    first_parsed = _extract_json_payload(first_raw)
+    first_detections = _normalised_detection_items(first_parsed, thumbnail_size)
+    first_overlay = run_dir / "first_pass_overlay.png"
+    _draw_redetect_overlay(thumbnail_path, first_detections, first_overlay)
+    first_result.update(
+        {
+            "raw_response": first_raw,
+            "parsed_response": first_parsed,
+            "detections": first_detections,
+            "overlay_path": str(first_overlay),
+        }
+    )
+    _write_json(first_result_path, first_result)
+
+    review_result_path = run_dir / "review_result.json"
+    review_result = _read_json(review_result_path) if review_result_path.exists() else {}
+    review_raw = str(record.get("review_raw") or review_result.get("raw_response") or "")
+    review_parsed = _extract_json_object(review_raw) if review_raw else {}
+    if review_result_path.exists():
+        review_result.update({"raw_response": review_raw, "parsed_response": review_parsed})
+        _write_json(review_result_path, review_result)
+
+    redetect_result_path = run_dir / "feedback_redetect_result.json"
+    redetect_result = _read_json(redetect_result_path) if redetect_result_path.exists() else {}
+    redetect_raw = str(record.get("feedback_redetect_raw") or redetect_result.get("raw_response") or "")
+    redetect_parsed = _extract_json_payload(redetect_raw)
+    redetect_detections = _normalised_detection_items(redetect_parsed, thumbnail_size)
+    redetect_overlay = run_dir / "feedback_redetect_overlay.png"
+    _draw_redetect_overlay(thumbnail_path, redetect_detections, redetect_overlay)
+    redetect_result.update(
+        {
+            "raw_response": redetect_raw,
+            "parsed_response": redetect_parsed,
+            "detections": redetect_detections,
+            "overlay_path": str(redetect_overlay),
+        }
+    )
+    _write_json(redetect_result_path, redetect_result)
+
+    record.update(
+        {
+            "first_pass_raw": first_raw,
+            "first_pass_parsed": first_parsed,
+            "first_pass_detections": first_detections,
+            "first_pass_overlay_path": str(first_overlay),
+            "first_pass_summary": f"{len(first_detections)} first-pass detections after parser refresh.",
+            "review_raw": review_raw,
+            "review_parsed": review_parsed,
+            "feedback_redetect_raw": redetect_raw,
+            "feedback_redetect_parsed": redetect_parsed,
+            "feedback_redetect_detections": redetect_detections,
+            "feedback_redetect_overlay_path": str(redetect_overlay),
+            "feedback_redetect_summary": f"{len(redetect_detections)} feedback-redetect detections after parser refresh.",
+            "parser_refreshed_at": _timestamp(),
+        }
+    )
+    _write_model_loop_pdf(run_dir, record)
+    _write_json(record_path, record)
+    return record
+
+
+def _detection_warnings_summary(detections: list[dict[str, Any]]) -> str:
+    modes: dict[str, int] = {}
+    warnings: dict[str, int] = {}
+    for detection in detections:
+        mode = str(detection.get("coordinate_interpretation", ""))
+        if mode:
+            modes[mode] = modes.get(mode, 0) + 1
+        for warning in detection.get("parser_warnings", []) or []:
+            warnings[str(warning)] = warnings.get(str(warning), 0) + 1
+    parts = []
+    if modes:
+        parts.append("modes=" + ", ".join(f"{key}:{value}" for key, value in sorted(modes.items())))
+    if warnings:
+        parts.append("warnings=" + ", ".join(f"{key}:{value}" for key, value in sorted(warnings.items())))
+    return " | ".join(parts) if parts else "no parser warnings"
+
+
+def _write_model_loop_comparison_pdf(output_path: Path, records: list[dict[str, Any]]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    title_font = _font(30)
+    body_font = _font(18)
+    small_font = _font(14)
+    pages: list[Image.Image] = []
+
+    summary_page = Image.new("RGB", (2200, 1350), "white")
+    draw = ImageDraw.Draw(summary_page)
+    y = 40
+    draw.text((45, y), "Case 070 per-model detect-review-redetect comparison", font=title_font, fill="black")
+    y += 45
+    if records:
+        draw.text((45, y), records[0].get("case_display", ""), font=body_font, fill="#222222")
+    y += 55
+    draw.text((45, y), "Summary", font=body_font, fill="black")
+    y += 35
+    for record in records:
+        slide = _slide_review(record.get("review_parsed", {}))
+        first_detections = record.get("first_pass_detections", [])
+        redetect_detections = record.get("feedback_redetect_detections", [])
+        line = (
+            f"{record.get('model', '')} ({record.get('run_label', '')}) | "
+            f"first_pass={len(first_detections)} | "
+            f"review missed={slide.get('missed_tissue_core')} needs_refinement={slide.get('needs_refinement')} "
+            f"pass={slide.get('overall_pass')} | "
+            f"feedback_redetect={len(redetect_detections)}"
+        )
+        y = _draw_wrapped(draw, (65, y), line, small_font, 170, "#111111")
+        y = _draw_wrapped(
+            draw,
+            (85, y + 5),
+            "First-pass parser: " + _detection_warnings_summary(first_detections),
+            small_font,
+            165,
+            "#222222",
+        )
+        y = _draw_wrapped(
+            draw,
+            (85, y + 5),
+            "Feedback parser: " + _detection_warnings_summary(redetect_detections),
+            small_font,
+            165,
+            "#222222",
+        )
+        y += 22
+    pages.append(summary_page)
+
+    for record in records:
+        page = Image.new("RGB", (2600, 2600), "white")
+        draw = ImageDraw.Draw(page)
+        slide = _slide_review(record.get("review_parsed", {}))
+        first_detections = record.get("first_pass_detections", [])
+        redetect_detections = record.get("feedback_redetect_detections", [])
+
+        y = 35
+        draw.text((45, y), str(record.get("model", "")), font=title_font, fill="black")
+        y += 42
+        draw.text((45, y), f"label={record.get('run_label', '')}", font=body_font, fill="#222222")
+        y += 32
+        draw.text(
+            (45, y),
+            f"first_pass={len(first_detections)} | review missed={slide.get('missed_tissue_core')} "
+            f"needs_refinement={slide.get('needs_refinement')} pass={slide.get('overall_pass')} | "
+            f"feedback_redetect={len(redetect_detections)}",
+            font=body_font,
+            fill="#111111",
+        )
+        y += 48
+
+        first_img = _thumb(Path(record["first_pass_overlay_path"]), (1150, 640))
+        redetect_img = _thumb(Path(record["feedback_redetect_overlay_path"]), (1150, 640))
+        draw.text((70, y), "First-pass raw output overlay", font=body_font, fill="black")
+        draw.text((1380, y), "Feedback-redetect raw output overlay", font=body_font, fill="black")
+        page.paste(first_img, (70, y + 35))
+        page.paste(redetect_img, (1380, y + 35))
+        y += 720
+
+        draw.text((70, y), "Parsed first-pass detections", font=body_font, fill="black")
+        draw.text((1380, y), "Parsed feedback-redetect detections", font=body_font, fill="black")
+        _draw_wrapped(
+            draw,
+            (70, y + 32),
+            _raw_excerpt(json.dumps(first_detections, sort_keys=True), 1500),
+            small_font,
+            105,
+            "#111111",
+        )
+        _draw_wrapped(
+            draw,
+            (1380, y + 32),
+            _raw_excerpt(json.dumps(redetect_detections, sort_keys=True), 1500),
+            small_font,
+            105,
+            "#111111",
+        )
+        y += 520
+
+        draw.text((70, y), "Raw model outputs", font=body_font, fill="black")
+        y += 35
+        raw = (
+            "First raw:\n"
+            + _raw_excerpt(record.get("first_pass_raw", ""), 900)
+            + "\n\nReview raw:\n"
+            + _raw_excerpt(record.get("review_raw", ""), 900)
+            + "\n\nRedetect raw:\n"
+            + _raw_excerpt(record.get("feedback_redetect_raw", ""), 900)
+        )
+        _draw_wrapped(draw, (70, y), raw, small_font, 210, "#222222")
+        pages.append(page)
+
+    if pages:
+        pages[0].save(output_path, "PDF", resolution=150, save_all=True, append_images=pages[1:])
+
+
+def _write_model_loop_comparison_reproduction(output_path: Path, args: argparse.Namespace, records: list[dict[str, Any]]) -> None:
+    reproduction = f"""\
+Stage 1 per-model loop comparison refresh
+=========================================
+
+Created: {_timestamp()}
+Git commit: {_repo_git_commit()}
+Comparison PDF: {output_path.resolve()}
+
+Command:
+python scripts/stage1_detection_review_pilot.py refresh-model-loops \\
+  --comparison-pdf {output_path.resolve()} \\
+"""
+    for run_dir in args.run_dir:
+        reproduction += f"  --run-dir {run_dir.resolve()} \\\n"
+    reproduction = reproduction.rstrip(" \\\n") + "\n\nInputs:\n"
+    for record in records:
+        reproduction += (
+            f"- {record.get('run_label', '')}: {record.get('model', '')}; "
+            f"first_pass={len(record.get('first_pass_detections', []))}; "
+            f"feedback_redetect={len(record.get('feedback_redetect_detections', []))}\n"
+        )
+    (output_path.parent / "reproduction.txt").write_text(reproduction)
+
+
+def cmd_refresh_model_loops(args: argparse.Namespace) -> int:
+    records = [_refresh_model_loop_record(path.resolve()) for path in args.run_dir]
+    if args.comparison_pdf:
+        _write_model_loop_comparison_pdf(args.comparison_pdf.resolve(), records)
+        _write_model_loop_comparison_reproduction(args.comparison_pdf.resolve(), args, records)
+    print(
+        json.dumps(
+            {
+                "refreshed": [
+                    {
+                        "run_label": record.get("run_label", ""),
+                        "model": record.get("model", ""),
+                        "first_pass_detections": len(record.get("first_pass_detections", [])),
+                        "feedback_redetect_detections": len(record.get("feedback_redetect_detections", [])),
+                    }
+                    for record in records
+                ],
+                "comparison_pdf": str(args.comparison_pdf.resolve()) if args.comparison_pdf else "",
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _slide_review(parsed: dict[str, Any]) -> dict[str, Any]:
     slide = parsed.get("slide_review")
     return slide if isinstance(slide, dict) else {}
@@ -1012,6 +1739,52 @@ Notes:
     (output_dir / "reproduction.txt").write_text(reproduction)
 
 
+def write_model_loop_reproduction(output_dir: Path, args: argparse.Namespace, record: dict[str, Any]) -> None:
+    reproduction = f"""\
+Stage 1 per-model detect-review-redetect loop
+=============================================
+
+Created: {_timestamp()}
+Git commit: {_repo_git_commit()}
+Model: {args.model}
+Manifest: {args.manifest.resolve()}
+Case: {record['case_display']}
+
+Command:
+PYTHONPATH=/data2/vj724/python_deps/openai_py310:$PYTHONPATH \\
+python scripts/stage1_detection_review_pilot.py run-model-loop \\
+  --manifest {args.manifest.resolve()} \\
+  --output-root {args.output_root.resolve()} \\
+  --index {args.index} \\
+  --model {args.model} \\
+  --run-label {args.run_label or _safe_slug(args.model)} \\
+  --temperature {args.temperature}
+
+Outputs:
+- First-pass task/result/overlay:
+  {output_dir / 'first_pass_task.json'}
+  {output_dir / 'first_pass_result.json'}
+  {output_dir / 'first_pass_overlay.png'}
+- Same-model review task/result:
+  {output_dir / 'review_task.json'}
+  {output_dir / 'review_result.json'}
+- Same-model feedback redetect task/result/overlay:
+  {output_dir / 'feedback_redetect_task.json'}
+  {output_dir / 'feedback_redetect_result.json'}
+  {output_dir / 'feedback_redetect_overlay.png'}
+- Combined result:
+  {output_dir / 'model_loop_result.json'}
+- Report:
+  {output_dir / 'model_loop_report.pdf'}
+
+Summary at generation:
+- First-pass detections: {len(record.get('first_pass_detections', []))}
+- Review missed_tissue_core: {_slide_review(record.get('review_parsed', {})).get('missed_tissue_core', '')}
+- Feedback-redetect detections: {len(record.get('feedback_redetect_detections', []))}
+"""
+    (output_dir / "reproduction.txt").write_text(reproduction)
+
+
 def cmd_summarize_detection_review(args: argparse.Namespace) -> int:
     summarize_detection_review(args.output_root.resolve())
     print(json.dumps({"output_root": str(args.output_root.resolve())}, indent=2))
@@ -1058,6 +1831,31 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--max-tokens", type=int, default=1200)
     feedback.add_argument("--dry-run", action="store_true")
     feedback.set_defaults(func=run_feedback_redetect)
+
+    loop = sub.add_parser(
+        "run-model-loop",
+        help="Run first-pass detection, same-model review, and same-model feedback redetection.",
+    )
+    loop.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    loop.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    loop.add_argument("--index", type=int, default=70)
+    loop.add_argument("--model", default=DEFAULT_MODEL)
+    loop.add_argument("--run-label", default=None)
+    loop.add_argument("--api-base", default=None)
+    loop.add_argument("--api-key", default=None)
+    loop.add_argument("--temperature", type=float, default=0.0)
+    loop.add_argument("--max-tokens", type=int, default=1200)
+    loop.add_argument("--review-max-tokens", type=int, default=1800)
+    loop.add_argument("--dry-run", action="store_true")
+    loop.set_defaults(func=run_model_loop)
+
+    refresh = sub.add_parser(
+        "refresh-model-loops",
+        help="Reparse saved model-loop raw outputs and rebuild overlays/PDFs without new VLM calls.",
+    )
+    refresh.add_argument("--run-dir", type=Path, action="append", required=True)
+    refresh.add_argument("--comparison-pdf", type=Path, default=None)
+    refresh.set_defaults(func=cmd_refresh_model_loops)
 
     summarize = sub.add_parser("summarize-detection-review", help="Regenerate summaries and PDF from existing results.")
     summarize.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
