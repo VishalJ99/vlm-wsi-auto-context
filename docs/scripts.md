@@ -111,6 +111,14 @@ Outputs are written under
 JSONL results, slide/bbox CSV summaries, a PDF visual packet, and
 `reproduction.txt`.
 
+The same script can run a targeted second-pass detector call using the previous
+overlay and reviewer feedback:
+
+```bash
+PYTHONPATH=/data2/vj724/python_deps/openai_py310:$PYTHONPATH \
+python scripts/stage1_detection_review_pilot.py run-feedback-redetect --index 70
+```
+
 ### `materialize_stage1_from_xml.py`
 Converts XML-derived detections into Stage 1-compatible outputs for downstream method use.
 
