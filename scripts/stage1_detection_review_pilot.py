@@ -41,6 +41,7 @@ KNOWN_CASE_NOTES = {
 
 PROMPT_VERSION = "stage1_detection_review_v2_blind_2026-05-15"
 FEEDBACK_REDETECT_PROMPT_VERSION = "stage1_feedback_redetect_v1_2026-05-15"
+RAW_OVERLAY_REVIEW_PROMPT_VERSION = "stage1_raw_overlay_box_review_v1_2026-05-23"
 
 DETECTION_REVIEW_PROMPT = """\
 You are auditing object-detection bounding boxes for tissue-core foreground regions on a whole-slide thumbnail.
@@ -149,6 +150,54 @@ Rules:
 - Include faint tissue fragments if they have tissue-like color or structure.
 - Ignore glass edges, pen marks, bubbles, dust, debris, and mounting-media smudges.
 - Output JSON only. Do not include prose.
+"""
+
+RAW_OVERLAY_REVIEW_PROMPT = """\
+Your task is to review the quality of this tissue detection overlay.
+
+Inputs:
+- Image 1 is a whole-slide thumbnail with raw tissue-detection bounding boxes drawn on it.
+- A text list gives every bbox id and its geometry.
+
+For each bounding box, output:
+1. tightness: whether the box is very_tight, very_loose, or ok.
+2. detection_signal: whether the box is detecting signal, noise, or uncertain.
+
+Definitions:
+- signal: visible tissue-like foreground is present inside the bbox at thumbnail scale.
+- noise: the bbox mainly covers background, glass marks, dust, pen, bubble, edge artifact, debris, or other non-tissue-like visual noise at thumbnail scale.
+- uncertain: the thumbnail overlay is not enough to confidently decide signal versus noise.
+- very_tight: the bbox appears to cut off visible tissue-like signal.
+- very_loose: the bbox includes a large amount of irrelevant background compared with the tissue-like signal.
+- ok: the bbox has reasonable coverage and margin for the visible signal at thumbnail scale.
+
+Do not use pathology domain knowledge.
+Do not infer control tissue, diagnosis, specimen type, or downstream handling.
+Do not judge missed tissue outside the boxes.
+Do not propose new boxes or refined coordinates.
+
+Return only one JSON object with this exact shape:
+{
+  "overlay_review": {
+    "bbox_count": 0,
+    "overall_quality": "ok",
+    "reasoning": "short summary"
+  },
+  "bbox_reviews": [
+    {
+      "bbox_id": "r0_01",
+      "tightness": "ok",
+      "detection_signal": "signal",
+      "reasoning": "short visual reason"
+    }
+  ]
+}
+
+Allowed tightness values: very_tight, very_loose, ok, uncertain.
+Allowed detection_signal values: signal, noise, uncertain.
+Allowed overall_quality values: ok, mixed, poor, uncertain.
+
+Every bbox id from the text list must appear exactly once in bbox_reviews.
 """
 
 
@@ -504,6 +553,102 @@ def _parse_detection_coords(
         warnings.append("degenerate_after_clipping")
     warnings.append("coords_outside_0_1000_clipped_as_normalized_yxyx")
     return bbox, [round(cy1), round(cx1), round(cy2), round(cx2)], "normalized_yxyx_clipped", warnings
+
+
+def _transform_normalized_yxyx_to_rot0(coords: list[float], rotation: int) -> list[float]:
+    """Transform a normalized yxyx bbox from the rotated detector view to the source thumbnail."""
+    y1, x1, y2, x2 = coords
+    if rotation == 0:
+        return [y1, x1, y2, x2]
+    if rotation == 90:
+        return [1000 - x2, y1, 1000 - x1, y2]
+    if rotation == 180:
+        return [1000 - y2, 1000 - x2, 1000 - y1, 1000 - x1]
+    if rotation == 270:
+        return [x1, 1000 - y2, x2, 1000 - y1]
+    raise ValueError(f"Unsupported rotation: {rotation}")
+
+
+def _load_raw_orientation_bboxes(
+    bboxes_path: Path,
+    thumbnail_size: tuple[int, int],
+    rotation: int,
+) -> tuple[list[dict[str, Any]], str]:
+    payload = json.loads(bboxes_path.read_text())
+    per_orientation = payload.get("per_orientation_raw")
+    if not isinstance(per_orientation, dict):
+        return [], "missing_per_orientation_raw"
+    raw_items = per_orientation.get(str(rotation))
+    if not isinstance(raw_items, list):
+        return [], f"missing_raw_rotation_{rotation}"
+
+    bboxes: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        coords = _detection_coords(item)
+        if not isinstance(coords, list) or len(coords) != 4:
+            continue
+        try:
+            raw_coords = [float(value) for value in coords]
+        except (TypeError, ValueError):
+            continue
+        warnings: list[str] = []
+        if all(0.0 <= value <= 1000.0 for value in raw_coords):
+            parse_coords = _transform_normalized_yxyx_to_rot0(raw_coords, rotation)
+            if rotation:
+                warnings.append(f"transformed_from_rot{rotation}_to_rot0")
+        else:
+            parse_coords = raw_coords
+            if rotation:
+                warnings.append("rotation_transform_skipped_for_non_normalized_coords")
+        bbox_thumbnail, normalized_box, interpretation, parse_warnings = _parse_detection_coords(
+            parse_coords,
+            thumbnail_size,
+        )
+        label = f"r{rotation}_{idx:02d}"
+        bboxes.append(
+            {
+                "label": label,
+                "source_label": str(item.get("label", "")),
+                "rotation": rotation,
+                "raw_box_2d": [round(value, 3) for value in raw_coords],
+                "box_2d_yxyx_normalized": normalized_box,
+                "coordinate_interpretation": interpretation,
+                "parser_warnings": warnings + parse_warnings,
+                "bbox_thumbnail": bbox_thumbnail,
+            }
+        )
+    if not bboxes:
+        return [], f"no_parseable_raw_rotation_{rotation}_bboxes"
+    return bboxes, ""
+
+
+def _raw_overlay_bbox_text(bboxes: list[dict[str, Any]], thumbnail_size: tuple[int, int]) -> str:
+    lines = [f"Thumbnail size: {thumbnail_size[0]} x {thumbnail_size[1]} pixels."]
+    for bbox in bboxes:
+        geom = _bbox_geometry(bbox, thumbnail_size)
+        lines.append(
+            "- "
+            + json.dumps(
+                {
+                    "bbox_id": bbox.get("label", ""),
+                    "source_label": bbox.get("source_label", ""),
+                    "rotation": bbox.get("rotation", ""),
+                    "raw_box_2d": bbox.get("raw_box_2d", []),
+                    "bbox_thumbnail": geom["bbox_thumbnail"],
+                    "area_ratio": geom["area_ratio"],
+                    "width_ratio": geom["width_ratio"],
+                    "height_ratio": geom["height_ratio"],
+                    "edge_touch_count": geom["edge_touch_count"],
+                    "geometry_edge_spanning": geom["geometry_edge_spanning"],
+                    "geometry_near_full_thumbnail": geom["geometry_near_full_thumbnail"],
+                    "parser_warnings": bbox.get("parser_warnings", []),
+                },
+                sort_keys=True,
+            )
+        )
+    return "\n".join(lines)
 
 
 def _draw_redetect_overlay(thumbnail_path: Path, detections: list[dict[str, Any]], output_path: Path) -> None:
@@ -866,6 +1011,193 @@ def run_detection_review(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "tasks": len(tasks),
+                "tasks_jsonl": str(tasks_path),
+                "results_jsonl": str(results_path),
+                "output_root": str(output_root),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def build_raw_overlay_review_tasks(args: argparse.Namespace) -> list[dict[str, Any]]:
+    output_root = args.output_root.resolve()
+    rows = _selected_rows(args.manifest.resolve(), args.indices)
+    tasks: list[dict[str, Any]] = []
+    for row in rows:
+        thumbnail_path = Path(row["thumbnail_path"])
+        bboxes_json_path = Path(row["bboxes_json_path"])
+        if not thumbnail_path.exists():
+            raise SystemExit(f"Thumbnail does not exist: {thumbnail_path}")
+        if not bboxes_json_path.exists():
+            raise SystemExit(f"Bboxes JSON does not exist: {bboxes_json_path}")
+        with Image.open(thumbnail_path) as image:
+            thumbnail_size = image.size
+
+        raw_bboxes, skip_reason = _load_raw_orientation_bboxes(
+            bboxes_json_path,
+            thumbnail_size,
+            args.rotation,
+        )
+        case_slug = _safe_slug(f"{int(row['index']):03d}_{Path(row['wsi_path']).stem}")
+        overlay_path = output_root / "raw_overlays" / f"{case_slug}_rot{args.rotation}_raw_overlay.png"
+        if raw_bboxes:
+            _draw_redetect_overlay(thumbnail_path, raw_bboxes, overlay_path)
+
+        task = {
+            "task_id": f"raw_overlay_review_{int(row['index']):03d}_rot{args.rotation}",
+            "prompt_version": RAW_OVERLAY_REVIEW_PROMPT_VERSION,
+            "model": args.model,
+            "case_display": _case_display(row),
+            "manifest_row": row,
+            "rotation": args.rotation,
+            "thumbnail_path": str(thumbnail_path),
+            "overlay_path": str(overlay_path) if raw_bboxes else "",
+            "bboxes_json_path": str(bboxes_json_path),
+            "bbox_count": len(raw_bboxes),
+            "bbox_text": _raw_overlay_bbox_text(raw_bboxes, thumbnail_size) if raw_bboxes else "",
+            "bboxes": [
+                {
+                    "label": bbox.get("label", ""),
+                    "source_label": bbox.get("source_label", ""),
+                    "rotation": bbox.get("rotation", ""),
+                    "raw_box_2d": bbox.get("raw_box_2d", []),
+                    "box_2d_yxyx_normalized": bbox.get("box_2d_yxyx_normalized", []),
+                    "coordinate_interpretation": bbox.get("coordinate_interpretation", ""),
+                    "parser_warnings": bbox.get("parser_warnings", []),
+                    **_bbox_geometry(bbox, thumbnail_size),
+                }
+                for bbox in raw_bboxes
+            ],
+            "prompt": RAW_OVERLAY_REVIEW_PROMPT,
+            "skip_reason": skip_reason,
+            "created_at": _timestamp(),
+        }
+        tasks.append(task)
+    tasks_path = output_root / "tasks" / f"raw_overlay_review_rot{args.rotation}_tasks.jsonl"
+    _write_jsonl(tasks_path, tasks)
+    return tasks
+
+
+def _review_one_raw_overlay(
+    task: dict[str, Any],
+    args: argparse.Namespace,
+    base_url: str,
+    api_key: str,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "task_id": task["task_id"],
+        "case_display": task["case_display"],
+        "prompt_version": task["prompt_version"],
+        "model": args.model,
+        "rotation": task["rotation"],
+        "thumbnail_path": task["thumbnail_path"],
+        "overlay_path": task["overlay_path"],
+        "bboxes_json_path": task["bboxes_json_path"],
+        "bbox_count": task["bbox_count"],
+        "bboxes": task["bboxes"],
+        "created_at": _timestamp(),
+        "error": "",
+        "skip_reason": task.get("skip_reason", ""),
+    }
+    if task.get("skip_reason"):
+        record["raw_response"] = ""
+        record["parsed_response"] = {
+            "overlay_review": {
+                "bbox_count": 0,
+                "overall_quality": "uncertain",
+                "reasoning": task["skip_reason"],
+            },
+            "bbox_reviews": [],
+        }
+        record["usage"] = {}
+        record["response_model"] = ""
+        return record
+
+    user_text = (
+        task["prompt"]
+        + "\n\nCase:\n"
+        + task["case_display"]
+        + f"\n\nReviewed detector orientation: rot{task['rotation']} only."
+        + "\n\nDetected bboxes:\n"
+        + task["bbox_text"]
+    )
+    try:
+        raw, usage, response_model = _chat_with_images(
+            model=args.model,
+            prompt_text=user_text,
+            image_paths=[Path(task["overlay_path"])],
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            base_url=base_url,
+            api_key=api_key,
+        )
+        parsed = _extract_json_object(raw)
+        record["raw_response"] = raw
+        record["parsed_response"] = parsed
+        record["usage"] = usage
+        record["response_model"] = response_model
+    except Exception as exc:
+        record["raw_response"] = ""
+        record["parsed_response"] = {}
+        record["usage"] = {}
+        record["response_model"] = ""
+        record["error"] = repr(exc)
+    return record
+
+
+def run_raw_overlay_review(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    tasks = build_raw_overlay_review_tasks(args)
+    tasks_path = output_root / "tasks" / f"raw_overlay_review_rot{args.rotation}_tasks.jsonl"
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "tasks": len(tasks),
+                    "reviewable_tasks": sum(1 for task in tasks if not task.get("skip_reason")),
+                    "skipped_tasks": sum(1 for task in tasks if task.get("skip_reason")),
+                    "tasks_jsonl": str(tasks_path),
+                    "output_root": str(output_root),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    base_url, api_key = _api_settings(args)
+    reviewable = [task for task in tasks if not task.get("skip_reason")]
+    skipped = [
+        _review_one_raw_overlay(task, args, base_url, api_key)
+        for task in tasks
+        if task.get("skip_reason")
+    ]
+    results: list[dict[str, Any]] = []
+    if args.max_concurrent > 1:
+        with ThreadPoolExecutor(max_workers=args.max_concurrent) as pool:
+            futures = [
+                pool.submit(_review_one_raw_overlay, task, args, base_url, api_key)
+                for task in reviewable
+            ]
+            for future in as_completed(futures):
+                results.append(future.result())
+    else:
+        results = [_review_one_raw_overlay(task, args, base_url, api_key) for task in reviewable]
+    results.extend(skipped)
+    results.sort(key=lambda row: row["task_id"])
+
+    results_path = output_root / "reviews" / f"raw_overlay_review_rot{args.rotation}_results.jsonl"
+    _write_jsonl(results_path, results)
+    summarize_raw_overlay_review(output_root, args.rotation, results)
+    write_raw_overlay_review_reproduction(output_root, args, tasks_path, results_path)
+    print(
+        json.dumps(
+            {
+                "tasks": len(tasks),
+                "reviewable_tasks": len(reviewable),
+                "skipped_tasks": len(skipped),
                 "tasks_jsonl": str(tasks_path),
                 "results_jsonl": str(results_path),
                 "output_root": str(output_root),
@@ -1475,6 +1807,64 @@ def _bbox_reviews(parsed: dict[str, Any]) -> list[dict[str, Any]]:
     return reviews if isinstance(reviews, list) else []
 
 
+def _raw_overlay_review(parsed: dict[str, Any]) -> dict[str, Any]:
+    review = parsed.get("overlay_review")
+    return review if isinstance(review, dict) else {}
+
+
+def _flat_raw_overlay_review_rows(results: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    slide_rows: list[dict[str, Any]] = []
+    bbox_rows: list[dict[str, Any]] = []
+    for result in results:
+        parsed = result.get("parsed_response") if isinstance(result.get("parsed_response"), dict) else {}
+        overlay_review = _raw_overlay_review(parsed)
+        bbox_reviews = _bbox_reviews(parsed)
+        geom_by_id = {
+            str(bbox.get("label", "")): bbox
+            for bbox in result.get("bboxes", [])
+            if isinstance(bbox, dict)
+        }
+        slide_rows.append(
+            {
+                "task_id": result.get("task_id", ""),
+                "case_display": result.get("case_display", ""),
+                "rotation": result.get("rotation", ""),
+                "bbox_count": result.get("bbox_count", ""),
+                "parse_ok": bool(overlay_review or bbox_reviews),
+                "error": result.get("error", ""),
+                "skip_reason": result.get("skip_reason", ""),
+                "overall_quality": overlay_review.get("overall_quality", ""),
+                "review_bbox_count": overlay_review.get("bbox_count", ""),
+                "reasoning": overlay_review.get("reasoning", ""),
+                "thumbnail_path": result.get("thumbnail_path", ""),
+                "overlay_path": result.get("overlay_path", ""),
+            }
+        )
+        for bbox in bbox_reviews:
+            bbox_id = str(bbox.get("bbox_id", ""))
+            geom = geom_by_id.get(bbox_id, {})
+            bbox_rows.append(
+                {
+                    "task_id": result.get("task_id", ""),
+                    "case_display": result.get("case_display", ""),
+                    "rotation": result.get("rotation", ""),
+                    "bbox_id": bbox_id,
+                    "source_label": geom.get("source_label", ""),
+                    "tightness": bbox.get("tightness", ""),
+                    "detection_signal": bbox.get("detection_signal", ""),
+                    "reasoning": bbox.get("reasoning", ""),
+                    "bbox_thumbnail": json.dumps(geom.get("bbox_thumbnail", [])),
+                    "raw_box_2d": json.dumps(geom.get("raw_box_2d", [])),
+                    "area_ratio": geom.get("area_ratio", ""),
+                    "width_ratio": geom.get("width_ratio", ""),
+                    "height_ratio": geom.get("height_ratio", ""),
+                    "edge_touch_count": geom.get("edge_touch_count", ""),
+                    "geometry_near_full_thumbnail": geom.get("geometry_near_full_thumbnail", ""),
+                }
+            )
+    return slide_rows, bbox_rows
+
+
 def _flat_summary_rows(results: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     slide_rows: list[dict[str, Any]] = []
     bbox_rows: list[dict[str, Any]] = []
@@ -1579,6 +1969,77 @@ def summarize_detection_review(output_root: Path, results: list[dict[str, Any]] 
     write_review_pdf(output_root, results, slide_rows, bbox_rows)
 
 
+def summarize_raw_overlay_review(
+    output_root: Path,
+    rotation: int,
+    results: list[dict[str, Any]] | None = None,
+) -> None:
+    if results is None:
+        results = _read_jsonl(output_root / "reviews" / f"raw_overlay_review_rot{rotation}_results.jsonl")
+    slide_rows, bbox_rows = _flat_raw_overlay_review_rows(results)
+    _write_csv(
+        output_root / "summary" / f"raw_overlay_review_rot{rotation}_slides.csv",
+        slide_rows,
+        [
+            "task_id",
+            "case_display",
+            "rotation",
+            "bbox_count",
+            "parse_ok",
+            "error",
+            "skip_reason",
+            "overall_quality",
+            "review_bbox_count",
+            "reasoning",
+            "thumbnail_path",
+            "overlay_path",
+        ],
+    )
+    _write_csv(
+        output_root / "summary" / f"raw_overlay_review_rot{rotation}_bboxes.csv",
+        bbox_rows,
+        [
+            "task_id",
+            "case_display",
+            "rotation",
+            "bbox_id",
+            "source_label",
+            "tightness",
+            "detection_signal",
+            "reasoning",
+            "bbox_thumbnail",
+            "raw_box_2d",
+            "area_ratio",
+            "width_ratio",
+            "height_ratio",
+            "edge_touch_count",
+            "geometry_near_full_thumbnail",
+        ],
+    )
+    tightness_counts: dict[str, int] = {}
+    signal_counts: dict[str, int] = {}
+    for row in bbox_rows:
+        tightness = str(row.get("tightness", ""))
+        signal = str(row.get("detection_signal", ""))
+        tightness_counts[tightness] = tightness_counts.get(tightness, 0) + 1
+        signal_counts[signal] = signal_counts.get(signal, 0) + 1
+    counts = {
+        "results": len(results),
+        "parse_ok": sum(1 for row in slide_rows if row["parse_ok"]),
+        "errors": sum(1 for row in slide_rows if row["error"]),
+        "skipped": sum(1 for row in slide_rows if row["skip_reason"]),
+        "bbox_reviews": len(bbox_rows),
+        "tightness_counts": tightness_counts,
+        "detection_signal_counts": signal_counts,
+        "overall_quality_counts": {
+            quality: sum(1 for row in slide_rows if row["overall_quality"] == quality)
+            for quality in sorted({str(row["overall_quality"]) for row in slide_rows})
+        },
+    }
+    _write_json(output_root / "summary" / f"raw_overlay_review_rot{rotation}_summary.json", counts)
+    write_raw_overlay_review_pdf(output_root, rotation, results, slide_rows, bbox_rows)
+
+
 def _font(size: int) -> ImageFont.ImageFont:
     for path in (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -1672,6 +2133,94 @@ def write_review_pdf(
         pages[0].save(pdf_path, "PDF", resolution=150, save_all=True, append_images=pages[1:])
 
 
+def write_raw_overlay_review_pdf(
+    output_root: Path,
+    rotation: int,
+    results: list[dict[str, Any]],
+    slide_rows: list[dict[str, Any]],
+    bbox_rows: list[dict[str, Any]],
+) -> None:
+    slide_by_task = {row["task_id"]: row for row in slide_rows}
+    bboxes_by_task: dict[str, list[dict[str, Any]]] = {}
+    for row in bbox_rows:
+        bboxes_by_task.setdefault(row["task_id"], []).append(row)
+
+    pages: list[Image.Image] = []
+    title_font = _font(28)
+    body_font = _font(18)
+    small_font = _font(14)
+    for result in results:
+        task_id = result["task_id"]
+        slide = slide_by_task.get(task_id, {})
+        rows = bboxes_by_task.get(task_id, [])
+        page = Image.new("RGB", (1800, 2400), "white")
+        draw = ImageDraw.Draw(page)
+        y = 30
+        draw.text((40, y), result.get("case_display", task_id), font=title_font, fill="black")
+        y += 46
+        header = (
+            f"raw rot{rotation} | quality={slide.get('overall_quality')} | "
+            f"boxes={slide.get('bbox_count')} | parsed={len(rows)} | "
+            f"skip={slide.get('skip_reason')}"
+        )
+        draw.text((40, y), header, font=body_font, fill="black")
+        y += 34
+        reason = str(slide.get("reasoning", ""))
+        y = _draw_wrapped(draw, (40, y), reason, small_font, 150, "#222222")
+        y += 16
+
+        overlay_raw = str(result.get("overlay_path", ""))
+        overlay_path = Path(overlay_raw) if overlay_raw else None
+        if overlay_path is not None and overlay_path.is_file():
+            overlay = _thumb(overlay_path, (1680, 760))
+            page.paste(overlay, (40, y))
+            y += overlay.height + 24
+        else:
+            draw.text((40, y), "No raw orientation overlay available.", font=body_font, fill="#aa0000")
+            y += 42
+
+        tightness_counts: dict[str, int] = {}
+        signal_counts: dict[str, int] = {}
+        for row in rows:
+            tightness_counts[str(row.get("tightness", ""))] = tightness_counts.get(str(row.get("tightness", "")), 0) + 1
+            signal_counts[str(row.get("detection_signal", ""))] = signal_counts.get(
+                str(row.get("detection_signal", "")),
+                0,
+            ) + 1
+        draw.text(
+            (40, y),
+            f"tightness={tightness_counts}  detection_signal={signal_counts}",
+            font=small_font,
+            fill="#111111",
+        )
+        y += 32
+        draw.text((40, y), "BBox reviews", font=body_font, fill="black")
+        y += 28
+        for bbox in rows:
+            line = (
+                f"{bbox.get('bbox_id')}: tightness={bbox.get('tightness')} / "
+                f"signal={bbox.get('detection_signal')} / area={bbox.get('area_ratio')} | "
+                f"{bbox.get('reasoning')}"
+            )
+            y = _draw_wrapped(draw, (60, y), line, small_font, 170, "#111111")
+            if y > 2320:
+                y = _draw_wrapped(
+                    draw,
+                    (60, y),
+                    "... [truncated on PDF page; full bbox rows are in CSV]",
+                    small_font,
+                    170,
+                    "#555555",
+                )
+                break
+        pages.append(page)
+
+    pdf_path = output_root / "visuals" / f"raw_overlay_review_rot{rotation}.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    if pages:
+        pages[0].save(pdf_path, "PDF", resolution=150, save_all=True, append_images=pages[1:])
+
+
 def write_reproduction(output_root: Path, args: argparse.Namespace, tasks_path: Path, results_path: Path) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     reproduction = f"""\
@@ -1706,6 +2255,55 @@ Notes:
 - This is a flag-only reviewer test. No second-pass bbox refinement is run.
 - Known-case notes are retained in local summaries only and are not sent to the VLM prompt.
 - Full-thumbnail boxes are treated as the severe limit case of loose localization and also marked with is_near_full_thumbnail_box.
+"""
+    (output_root / "reproduction.txt").write_text(reproduction)
+
+
+def write_raw_overlay_review_reproduction(
+    output_root: Path,
+    args: argparse.Namespace,
+    tasks_path: Path,
+    results_path: Path,
+) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    reproduction = f"""\
+Stage 1 raw-orientation overlay reviewer pass
+============================================
+
+Created: {_timestamp()}
+Git commit: {_repo_git_commit()}
+Ticket: PER-207
+Prompt version: {RAW_OVERLAY_REVIEW_PROMPT_VERSION}
+Model: {args.model}
+Backend: OpenRouter-compatible chat completions
+Manifest: {args.manifest.resolve()}
+Detector orientation reviewed: rot{args.rotation}
+Task indices: {','.join(str(i) for i in args.indices)}
+
+Command:
+python scripts/stage1_detection_review_pilot.py run-raw-overlay-review \\
+  --manifest {args.manifest.resolve()} \\
+  --output-root {output_root} \\
+  --indices {','.join(str(i) for i in args.indices)} \\
+  --rotation {args.rotation} \\
+  --model {args.model} \\
+  --max-concurrent {args.max_concurrent} \\
+  --temperature {args.temperature}
+
+Outputs:
+- Tasks: {tasks_path}
+- Raw/parsed results: {results_path}
+- Slide summary: {output_root / 'summary' / f'raw_overlay_review_rot{args.rotation}_slides.csv'}
+- Bbox summary: {output_root / 'summary' / f'raw_overlay_review_rot{args.rotation}_bboxes.csv'}
+- Summary JSON: {output_root / 'summary' / f'raw_overlay_review_rot{args.rotation}_summary.json'}
+- PDF: {output_root / 'visuals' / f'raw_overlay_review_rot{args.rotation}.pdf'}
+- Raw overlays: {output_root / 'raw_overlays'}
+
+Notes:
+- This pass reviews only one raw detector orientation from `per_orientation_raw`.
+- It intentionally does not use the postprocessed/merged Stage 1 bbox set.
+- It does not review missed tissue, does not propose refined coordinates, and does not use pathology/control-tissue semantics.
+- Each bbox is graded only for thumbnail-level tightness and signal-vs-noise.
 """
     (output_root / "reproduction.txt").write_text(reproduction)
 
@@ -1820,6 +2418,23 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(func=run_detection_review)
 
+    raw = sub.add_parser(
+        "run-raw-overlay-review",
+        help="Run paid VLM review over one raw detector orientation without TTA merge postprocessing.",
+    )
+    raw.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    raw.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT / "raw_overlay_review_v1")
+    raw.add_argument("--indices", type=parse_indices, default=list(range(1, 101)))
+    raw.add_argument("--rotation", type=int, choices=[0, 90, 180, 270], default=0)
+    raw.add_argument("--model", default=DEFAULT_MODEL)
+    raw.add_argument("--api-base", default=None)
+    raw.add_argument("--api-key", default=None)
+    raw.add_argument("--temperature", type=float, default=0.0)
+    raw.add_argument("--max-tokens", type=int, default=1400)
+    raw.add_argument("--max-concurrent", type=int, default=8)
+    raw.add_argument("--dry-run", action="store_true")
+    raw.set_defaults(func=run_raw_overlay_review)
+
     feedback = sub.add_parser(
         "run-feedback-redetect",
         help="Rerun detector on one case using thumbnail, prior overlay, and reviewer feedback.",
@@ -1868,6 +2483,18 @@ def build_parser() -> argparse.ArgumentParser:
     summarize = sub.add_parser("summarize-detection-review", help="Regenerate summaries and PDF from existing results.")
     summarize.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     summarize.set_defaults(func=cmd_summarize_detection_review)
+
+    summarize_raw = sub.add_parser(
+        "summarize-raw-overlay-review",
+        help="Regenerate raw-orientation overlay reviewer summaries and PDF from existing results.",
+    )
+    summarize_raw.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT / "raw_overlay_review_v1")
+    summarize_raw.add_argument("--rotation", type=int, choices=[0, 90, 180, 270], default=0)
+    summarize_raw.set_defaults(
+        func=lambda args: (
+            summarize_raw_overlay_review(args.output_root.resolve(), args.rotation) or 0
+        )
+    )
 
     return parser
 
