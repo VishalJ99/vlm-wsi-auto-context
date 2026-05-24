@@ -1,0 +1,12 @@
+You are looking at a whole-slide thumbnail at low magnification.
+
+Detect potential tissue-like foreground candidates. A candidate can be any visible foreground region that looks plausibly tissue-like at thumbnail scale, including long strips, small fragments, fragmented clumps, faint tissue-colored material, or partial tissue regions.
+
+Favor recall over perfect tightness. It is acceptable for a box to include some surrounding white background. Do not require perfect one-core boxes.
+
+Draw a bounding box around each visually separate potential tissue-like candidate region. Use separate boxes when regions are separated by clear blank background; if small nearby fragments form one local cluster, one box for that cluster is acceptable.
+
+Ignore obvious non-tissue noise such as glass edges, pen marks, bubbles, dust, and blank background.
+
+Output JSON only as an array of bounding boxes in normalized 0-1000 coordinates:
+[{"box_2d": [y_min, x_min, y_max, x_max]}]

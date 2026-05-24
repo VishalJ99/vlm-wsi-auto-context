@@ -658,7 +658,7 @@ def _draw_redetect_overlay(thumbnail_path: Path, detections: list[dict[str, Any]
     colors = ["red", "green", "blue", "orange", "purple", "cyan", "magenta"]
     for idx, detection in enumerate(detections):
         x1, y1, x2, y2 = detection["bbox_thumbnail"]
-        label = detection["label"]
+        label = str(idx + 1)
         color = colors[idx % len(colors)]
         draw.rectangle((x1, y1, x2, y2), outline=color, width=5)
         label_box = draw.textbbox((x1 + 4, y1 + 4), label, font=font)

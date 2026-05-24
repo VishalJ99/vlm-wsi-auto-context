@@ -119,6 +119,15 @@ PYTHONPATH=/data2/vj724/python_deps/openai_py310:$PYTHONPATH \
 python scripts/stage1_detection_review_pilot.py run-feedback-redetect --index 70
 ```
 
+### `scripts/stage1_high_recall_pilot.py`
+Runs the PER-207 high-recall Stage 1 detector prompt across the balanced pilot
+worklist using one raw orientation, then exports numeric-only raw overlays,
+summary CSV/JSON, a PDF packet, logs, and `reproduction.txt`:
+
+```bash
+python scripts/stage1_high_recall_pilot.py --max-concurrent 4
+```
+
 ### `materialize_stage1_from_xml.py`
 Converts XML-derived detections into Stage 1-compatible outputs for downstream method use.
 

@@ -899,7 +899,7 @@ def draw_bboxes_overlay(
         )
         ax.add_patch(rect)
 
-        label = bbox.get('label', f'bbox_{i}')
+        label = str(i + 1)
         ax.text(
             x1 + 5, y1 + 15,
             label,
@@ -917,7 +917,7 @@ def draw_bboxes_overlay(
     print(f"Saved overlay: {save_path}")
 
 
-def generate_output_dir(wsi_path: str, model: str) -> Path:
+def generate_output_dir(wsi_path: str, model: str, output_base_dir: str | Path = OUTPUT_BASE_DIR) -> Path:
     """
     Generate output directory path for Stage 1.
 
@@ -926,7 +926,7 @@ def generate_output_dir(wsi_path: str, model: str) -> Path:
     case_name = Path(wsi_path).stem
     model_dir = sanitize_model_name(model)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path(OUTPUT_BASE_DIR) / case_name / model_dir / timestamp
+    return Path(output_base_dir) / case_name / model_dir / timestamp
 
 
 def load_prompt(prompt_arg: Optional[str], model: str) -> str:
@@ -1475,6 +1475,16 @@ Examples:
         action='store_true',
         help='Save per-bbox region PNGs from level 0 under bbox_regions/ (downsampled to --max-dim).'
     )
+    parser.add_argument(
+        '--output-base-dir',
+        default=OUTPUT_BASE_DIR,
+        help=f'Base directory for generated Stage 1 outputs (default: {OUTPUT_BASE_DIR})'
+    )
+    parser.add_argument(
+        '--output-dir',
+        default=None,
+        help='Exact output directory to write. Overrides --output-base-dir timestamped layout.'
+    )
 
     return parser
 
@@ -1510,7 +1520,11 @@ def main():
         print(f"Warning: Reproducibility check bypassed: {state_info.get('reason')}")
 
     # === STEP 3: Generate output directory ===
-    output_dir = generate_output_dir(wsi_path, args.model)
+    output_dir = Path(args.output_dir) if args.output_dir else generate_output_dir(
+        wsi_path,
+        args.model,
+        args.output_base_dir,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {output_dir}")
     print()
