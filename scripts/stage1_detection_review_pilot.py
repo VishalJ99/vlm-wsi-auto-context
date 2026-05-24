@@ -716,10 +716,14 @@ def _chat_with_images(
     max_tokens: int,
     base_url: str,
     api_key: str,
+    reasoning_effort: str | None = None,
 ) -> tuple[str, dict[str, Any], str]:
     from openai import OpenAI
 
     client = OpenAI(base_url=base_url, api_key=api_key)
+    request_kwargs: dict[str, Any] = {}
+    if reasoning_effort:
+        request_kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -734,6 +738,7 @@ def _chat_with_images(
         ],
         temperature=temperature,
         max_tokens=max_tokens,
+        **request_kwargs,
     )
     raw = response.choices[0].message.content or ""
     usage = response.usage.model_dump() if getattr(response, "usage", None) else {}
