@@ -1,0 +1,11 @@
+You are reading a review of a tissue-detection model on a whole-slide thumbnail.
+
+Task: did this review describe a non-minor detection failure?
+
+Return only JSON:
+{
+  "answer": "yes",
+  "justification": "short reason"
+}
+
+Allowed answer values: yes, no.

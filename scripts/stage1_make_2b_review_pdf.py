@@ -159,8 +159,17 @@ def _make_title_page(args: argparse.Namespace, stage2b_rows: dict[int, dict[str,
     y += 35
     draw.text((55, y), "Stage 2b Prompt", font=HEADER_FONT, fill="black")
     y += 34
-    prompt_path = Path(stage2b_rows[min(stage2b_rows)].get("prompt_file", ""))
-    prompt_text = prompt_path.read_text().strip() if prompt_path.exists() else "Prompt file not found in results."
+    first_row = stage2b_rows[min(stage2b_rows)]
+    prompt_paths = [
+        Path(first_row.get("prompt_file", "")),
+        Path(first_row.get("first_prompt_file", "")),
+        Path(first_row.get("second_prompt_file", "")),
+    ]
+    prompt_parts: list[str] = []
+    for prompt_path in prompt_paths:
+        if prompt_path.exists() and prompt_path.is_file():
+            prompt_parts.append(f"{prompt_path.name}:\n{prompt_path.read_text().strip()}")
+    prompt_text = "\n\n".join(prompt_parts) if prompt_parts else "Prompt file not found in results."
     _draw_wrapped(draw, (75, y), prompt_text, BODY_FONT, 145)
     return page
 
@@ -187,21 +196,37 @@ def _make_case_page(
         f"thinking={stage2a.get('reasoning_effort', '')} | "
         f"reviewed boxes={stage2a.get('reviewed_bbox_count', '')}"
     )
-    stage2b_value = stage2b.get("non_minor_detection_failure", stage2b.get("trigger_refinement", ""))
-    stage2b_line = (
-        f"Stage 2b low thinking: non_minor_detection_failure={stage2b_value} | "
-        f"raw={str(stage2b.get('raw_response', '')).strip()!r}"
-    )
+    if "final_non_minor_detection_failure" in stage2b:
+        stage2b_line = (
+            "Stage 2b low-thinking two-pass: "
+            f"first={stage2b.get('first_non_minor_detection_failure', '')} | "
+            f"final={stage2b.get('final_non_minor_detection_failure', '')}"
+        )
+    else:
+        stage2b_value = stage2b.get("non_minor_detection_failure", stage2b.get("trigger_refinement", ""))
+        stage2b_line = (
+            f"Stage 2b low thinking: non_minor_detection_failure={stage2b_value} | "
+            f"raw={str(stage2b.get('raw_response', '')).strip()!r}"
+        )
     y = _draw_wrapped(draw, (45, y), stage1_line, BODY_FONT, 160)
     y = _draw_wrapped(draw, (45, y), stage2a_line, BODY_FONT, 160)
     y = _draw_wrapped(draw, (45, y), stage2b_line, BODY_FONT, 160)
     y += 18
 
-    images = [
-        ("Source thumbnail", stage1.get("thumbnail_path") or stage2a.get("thumbnail_path")),
-        ("Stage 1 raw overlay", stage1.get("raw_overlay_path")),
-        ("Stage 1 final / Stage 2a input overlay", stage2a.get("review_overlay_path") or stage1.get("final_overlay_path")),
-    ]
+    raw_overlay = stage1.get("raw_overlay_path", "")
+    review_overlay = stage2a.get("review_overlay_path") or stage1.get("final_overlay_path")
+    if raw_overlay and review_overlay and Path(raw_overlay) == Path(review_overlay):
+        images = [
+            ("Source thumbnail", stage1.get("thumbnail_path") or stage2a.get("thumbnail_path")),
+            ("Stage 1 raw overlay / Stage 2a input", raw_overlay),
+            ("Stage 1 final overlay reference", stage1.get("final_overlay_path")),
+        ]
+    else:
+        images = [
+            ("Source thumbnail", stage1.get("thumbnail_path") or stage2a.get("thumbnail_path")),
+            ("Stage 1 raw overlay", raw_overlay),
+            ("Stage 2a input overlay", review_overlay),
+        ]
     for x, label, path in zip((45, 770, 1495), [item[0] for item in images], [item[1] for item in images]):
         draw.text((x, y), label, font=HEADER_FONT, fill="black")
         page.paste(_thumb(path or "", (660, 420)), (x, y + 34))
@@ -216,9 +241,22 @@ def _make_case_page(
     y += 24
     draw.text((45, y), "Stage 2b Low-Thinking Output", font=HEADER_FONT, fill="black")
     y += 34
-    y = _draw_wrapped(draw, (65, y), str(stage2b.get("raw_response", "")).strip(), BODY_FONT, 160)
+    if "final_non_minor_detection_failure" in stage2b:
+        first_text = (
+            f"First pass: {stage2b.get('first_non_minor_detection_failure')} | "
+            f"{stage2b.get('first_justification', '')}"
+        )
+        second_text = (
+            f"Second pass: {stage2b.get('final_non_minor_detection_failure')} | "
+            f"{stage2b.get('final_justification', '')}"
+        )
+        y = _draw_wrapped(draw, (65, y), first_text, BODY_FONT, 160)
+        y += 8
+        y = _draw_wrapped(draw, (65, y), second_text, BODY_FONT, 160)
+    else:
+        y = _draw_wrapped(draw, (65, y), str(stage2b.get("raw_response", "")).strip(), BODY_FONT, 160)
     rationale = str(stage2b.get("rationale", "")).strip()
-    if rationale and rationale.lower() not in {"yes", "no"}:
+    if rationale and rationale.lower() not in {"yes", "no"} and "final_non_minor_detection_failure" not in stage2b:
         y += 12
         _draw_wrapped(draw, (65, y), f"Parsed rationale: {rationale}", TINY_FONT, 190, "#555555")
     return page

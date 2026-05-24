@@ -14,6 +14,11 @@ Current pipeline stages:
    Gemini 3 Flash text router prompt for deciding whether the Stage 2a
    free-text review reports a non-minor detection error. This is intentionally
    binary and does not mention downstream triggering.
+   `stage2b_nonminor_detection_failure_json.txt` is the JSON-output variant
+   with yes/no plus justification.
+   `stage2b_nonminor_detection_failure_adjudicate_json.txt` is the second-pass
+   JSON adjudicator over the original review plus the first-pass Stage 2b
+   answer/reason.
    `stage2b_review_trigger_router.txt` is the older simple trigger-framed
    prompt.
    `stage2b_review_trigger_router_v2_conservative.txt` is the stricter

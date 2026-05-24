@@ -128,17 +128,29 @@ def _parse_router_response(raw: str) -> dict[str, Any]:
     error_types = payload.get("error_types")
     if not isinstance(error_types, list):
         error_types = []
+    answer = payload.get("answer")
+    if isinstance(answer, str):
+        answer_value = answer.strip().lower()
+    elif isinstance(trigger, bool):
+        answer_value = "yes" if trigger else "no"
+    else:
+        answer_value = ""
     severity = str(payload.get("severity") or "").strip()
     if not severity:
         severity = "non_minor" if trigger is True else "none" if trigger is False else "uncertain"
     rationale = str(payload.get("rationale") or payload.get("reasoning") or "").strip()
+    justification = str(payload.get("justification") or "").strip()
+    if not rationale:
+        rationale = justification
     if not rationale and binary_answer is not None:
         rationale = raw
     return {
+        "answer": answer_value,
         "non_minor_detection_failure": trigger,
         "trigger_refinement": trigger,
         "severity": severity,
         "error_types": [str(item) for item in error_types],
+        "justification": justification or rationale,
         "rationale": rationale,
     }
 

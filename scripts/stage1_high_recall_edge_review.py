@@ -316,7 +316,13 @@ def _build_tasks(args: argparse.Namespace) -> list[dict[str, Any]]:
         raw_detections = _parse_raw_response(row, thumbnail_size)
         final_detections = _parse_final_bboxes(row)
         kind = _task_kind(row)
-        if kind == "zero_coverage":
+        if args.overlay_source == "raw":
+            reviewed_bboxes = raw_detections
+            overlay_kind = "raw_response_overlay" if reviewed_bboxes else "empty_overlay"
+        elif args.overlay_source == "final":
+            reviewed_bboxes = final_detections
+            overlay_kind = "final_stage1_overlay" if reviewed_bboxes else "empty_overlay"
+        elif kind == "zero_coverage":
             reviewed_bboxes: list[dict[str, Any]] = []
             overlay_kind = "empty_overlay"
         elif kind == "raw_giant_bbox_geometry":
@@ -854,6 +860,8 @@ def _write_reproduction(
         args.model,
         "--max-concurrent",
         str(args.max_concurrent),
+        "--overlay-source",
+        args.overlay_source,
         "--max-tokens",
         str(args.max_tokens),
         "--second-max-tokens",
@@ -878,6 +886,7 @@ Ticket: PER-207
 Model: {args.model}
 Reasoning effort: {args.reasoning_effort or 'unspecified'}
 Qualitative only: {args.qualitative_only}
+Overlay source: {args.overlay_source}
 Max tokens: {args.max_tokens}
 Second-pass max tokens: {args.second_max_tokens}
 Cases CSV: {args.cases_csv.resolve()}
@@ -991,6 +1000,7 @@ def run(args: argparse.Namespace) -> int:
         "model": args.model,
         "reasoning_effort": args.reasoning_effort or "",
         "qualitative_only": args.qualitative_only,
+        "overlay_source": args.overlay_source,
         "max_tokens": args.max_tokens,
         "second_max_tokens": args.second_max_tokens,
         "cases": len(case_rows),
@@ -1021,6 +1031,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--second-max-tokens", type=int, default=1800)
     parser.add_argument("--max-concurrent", type=int, default=3)
     parser.add_argument("--qualitative-only", action="store_true")
+    parser.add_argument("--overlay-source", choices=["auto", "raw", "final"], default="auto")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
