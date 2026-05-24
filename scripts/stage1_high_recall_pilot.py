@@ -21,8 +21,10 @@ from stage1_detection_review_pilot import (
     DEFAULT_MODEL,
     _draw_redetect_overlay,
     _draw_wrapped,
+    _extract_json_payload,
     _font,
     _load_raw_orientation_bboxes,
+    _normalised_detection_items,
     _safe_slug,
     _thumb,
     _write_csv,
@@ -227,6 +229,8 @@ def _summarize_case(task: dict[str, Any], args: argparse.Namespace) -> dict[str,
         "metadata_path": str(metadata_path) if metadata_path.exists() else "",
         "raw_response_path": str(raw_response_path) if raw_response_path.exists() else "",
         "raw_rot0_count": 0,
+        "raw_response_box_count": 0,
+        "raw_response_status": "",
         "final_count": 0,
         "raw_parse_note": "",
         "prompt_matches": "",
@@ -238,8 +242,8 @@ def _summarize_case(task: dict[str, Any], args: argparse.Namespace) -> dict[str,
     with Image.open(thumbnail_path) as image:
         thumbnail_size = image.size
 
-    if bboxes_path.exists():
-        try:
+    try:
+        if bboxes_path.exists():
             raw_bboxes, raw_note = _load_raw_orientation_bboxes(bboxes_path, thumbnail_size, args.rotation)
             row["raw_rot0_count"] = len(raw_bboxes)
             row["raw_parse_note"] = raw_note
@@ -249,8 +253,35 @@ def _summarize_case(task: dict[str, Any], args: argparse.Namespace) -> dict[str,
             payload = _read_json(bboxes_path)
             detected = payload.get("detected_regions") if isinstance(payload.get("detected_regions"), list) else []
             row["final_count"] = len(detected)
-        except Exception as exc:
-            row["error"] = row["error"] or repr(exc)
+            row["raw_response_box_count"] = len(raw_bboxes)
+            row["raw_response_status"] = "accepted_raw_bboxes" if raw_bboxes else "accepted_zero_raw_bboxes"
+        elif raw_response_path.exists():
+            raw_text = raw_response_path.read_text()
+            payload = _extract_json_payload(raw_text)
+            raw_detections = _normalised_detection_items(payload, thumbnail_size)
+            row["raw_response_box_count"] = len(raw_detections)
+            if raw_detections:
+                _draw_redetect_overlay(thumbnail_path, raw_detections, raw_overlay_path)
+                row["raw_overlay_path"] = str(raw_overlay_path)
+                if len(raw_detections) == 1:
+                    geom = raw_detections[0]
+                    x1, y1, x2, y2 = geom["bbox_thumbnail"]
+                    width, height = thumbnail_size
+                    area_ratio = ((x2 - x1) * (y2 - y1)) / float(max(1, width * height))
+                    if area_ratio > 0.6:
+                        row["raw_response_status"] = "giant_bbox_rejected"
+                    else:
+                        row["raw_response_status"] = "raw_boxes_without_stage1_bboxes_json"
+                else:
+                    row["raw_response_status"] = "raw_boxes_without_stage1_bboxes_json"
+            elif raw_text.strip() in {"[]", "```json\n[]\n```"}:
+                row["raw_response_status"] = "empty_json_payload"
+            else:
+                row["raw_response_status"] = "no_parseable_bbox_payload"
+        else:
+            row["raw_response_status"] = "missing_raw_response"
+    except Exception as exc:
+        row["error"] = row["error"] or repr(exc)
     if metadata_path.exists():
         try:
             metadata = _read_json(metadata_path)
@@ -290,7 +321,8 @@ def _write_pdf(output_root: Path, args: argparse.Namespace, rows: list[dict[str,
         y += 46
         header = (
             f"status={row.get('status')} | raw rot{args.rotation} boxes={row.get('raw_rot0_count')} | "
-            f"final boxes={row.get('final_count')} | prompt_matches={row.get('prompt_matches')}"
+            f"raw response boxes={row.get('raw_response_box_count')} | "
+            f"final boxes={row.get('final_count')} | raw_status={row.get('raw_response_status')}"
         )
         draw.text((45, y), header, font=body_font, fill="black")
         y += 35
@@ -368,6 +400,7 @@ Notes:
 - Each case uses a single raw detector orientation: rot{args.rotation}.
 - Rendered overlays use compact numeric labels only. Raw VLM labels, if any, remain in bboxes.json and raw responses for provenance.
 - Stage 1 padding/merge is still applied after the raw high-recall detector output.
+- Summary distinguishes accepted raw boxes, no parseable bbox payloads, empty JSON payloads, and giant-bbox rejection guard cases.
 """
     (output_root / "reproduction.txt").write_text(text)
 
@@ -415,8 +448,20 @@ def run(args: argparse.Namespace) -> int:
         "output_root": str(args.output_root),
         "cases": len(case_rows),
         "errors": sum(1 for row in case_rows if row.get("error")),
-        "raw_zero_box_cases": sum(1 for row in case_rows if int(row.get("raw_rot0_count") or 0) == 0),
+        "accepted_raw_zero_box_cases": sum(
+            1 for row in case_rows if row.get("raw_response_status") == "accepted_zero_raw_bboxes"
+        ),
+        "raw_no_parseable_bbox_payload_cases": sum(
+            1 for row in case_rows if row.get("raw_response_status") == "no_parseable_bbox_payload"
+        ),
+        "raw_empty_json_payload_cases": sum(
+            1 for row in case_rows if row.get("raw_response_status") == "empty_json_payload"
+        ),
+        "giant_bbox_rejected_cases": sum(
+            1 for row in case_rows if row.get("raw_response_status") == "giant_bbox_rejected"
+        ),
         "total_raw_rot0_boxes": sum(int(row.get("raw_rot0_count") or 0) for row in case_rows),
+        "total_raw_response_boxes": sum(int(row.get("raw_response_box_count") or 0) for row in case_rows),
         "total_final_boxes": sum(int(row.get("final_count") or 0) for row in case_rows),
         "prompt_mismatch_cases": sum(1 for row in case_rows if row.get("prompt_matches") != "true"),
     }

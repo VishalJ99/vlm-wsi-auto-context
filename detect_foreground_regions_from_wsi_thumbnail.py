@@ -1271,7 +1271,7 @@ def run_orientation_tta(
                 # Handle rejected orientation (giant bbox after all retries)
                 if was_rejected:
                     per_orientation_bboxes[rot] = []
-                    print(f"  {rot}°: REJECTED (giant bbox >80% coverage after retries)")
+                    print(f"  {rot}°: REJECTED (giant bbox >60% coverage after retries)")
                     continue
 
                 # Store parsed bboxes
