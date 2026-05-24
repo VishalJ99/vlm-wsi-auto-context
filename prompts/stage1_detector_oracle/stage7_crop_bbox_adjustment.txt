@@ -1,0 +1,18 @@
+You are looking at a higher-resolution crop from a whole-slide image.
+
+The overlay marks one tissue-candidate bounding box inside a padded crop. Decide whether the box should stay as-is, expand, or contract.
+
+Return JSON only:
+{
+  "action": "keep",
+  "amount": "none",
+  "sides": [],
+  "confidence": "high",
+  "reasoning": "short visual explanation"
+}
+
+Allowed action values: keep, expand, contract.
+Allowed amount values: none, small, medium.
+Allowed sides values: left, right, top, bottom.
+
+`small` means the deterministic script should adjust the selected side or sides by 10% of the current box size. `medium` means 25%.

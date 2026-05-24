@@ -1,0 +1,13 @@
+You are looking at a higher-resolution crop from a whole-slide image.
+
+The overlay marks one tissue-candidate bounding box inside a padded crop. Decide whether the marked candidate is genuine tissue-like signal or non-tissue artifact/noise.
+
+Return JSON only:
+{
+  "is_tissue_like_signal": true,
+  "classification": "true_positive",
+  "confidence": "high",
+  "reasoning": "short visual explanation"
+}
+
+Allowed classification values: true_positive, false_positive, uncertain.

@@ -1,0 +1,9 @@
+You are reviewing a highlighted tissue-candidate detection.
+
+Check if it contains multiple instances and can be split and reduced further.
+
+Output `yes` if you decide to split further.
+
+Output `no` if the detection is already atomic.
+
+Then give one short reason.

@@ -1,0 +1,10 @@
+Stage 4 crop export is a deterministic input-preparation step.
+
+For each retained tissue-candidate bounding box:
+- add 30% padding on each side of the box, clipped to the whole-slide image bounds;
+- read the padded region from the WSI pyramid at a level that gives an output crop with max dimension near 1024 px when possible;
+- use WSI pixels for this read, not pixels cropped from the Stage 1 thumbnail or thumbnail overlay;
+- save the raw crop and a selected-candidate overlay where only this candidate box is shown;
+- pass the selected-candidate overlay to crop-level VLM calls.
+
+No model decision is made in this stage.

@@ -32,12 +32,25 @@ Current pipeline stages:
    detector task from the source thumbnail plus raw Stage 1 overlay and raw
    Stage 2a reviewer feedback. This is the first refinement/redetection
    experiment after Stage 2b flags a non-minor detection failure.
+6. `stage4_crop_export_spec.txt`:
+   Deterministic Stage 4 crop-export spec. Each retained bbox is converted back
+   to WSI coordinates, padded by 30%, and reread from the WSI pyramid near a
+   1024 px max dimension rather than cropped from the thumbnail.
+7. `stage5a_crop_split_review.txt`:
+   Gemini 3 Flash crop-level reduce/atomicity reviewer prompt over a
+   selected-candidate overlay. The current test asks only whether the
+   highlighted candidate contains multiple instances and can be split/reduced
+   further, or whether it is already atomic.
+8. `stage6_crop_true_false_positive.txt`:
+   Gemini 3 Flash high-thinking crop-level true-positive/false-positive prompt.
+9. `stage7_crop_bbox_adjustment.txt`:
+   Gemini 3 Flash high-thinking crop-level bbox adjustment prompt. The
+   deterministic loop maps `small` to 10% and `medium` to 25% side adjustments.
 
 Legacy structured reviewer prompts are retained for reproducibility:
 
 - `legacy_zero_box_coverage_review.txt`
 - `legacy_bbox_geometry_review.txt`
 
-Later crop-level prompts for split review, false-positive/true-positive
-classification, and iterative crop-level bbox refinement should be added here
-when those stages are finalized.
+These crop-level prompts are currently packet-tested on a small PER-207 subset
+before scaling to paid calls over the pilot set.
