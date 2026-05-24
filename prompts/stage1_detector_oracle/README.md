@@ -37,12 +37,13 @@ Current pipeline stages:
    to WSI coordinates, padded by 30%, and reread from the WSI pyramid near a
    1024 px max dimension rather than cropped from the thumbnail.
 7. `stage5a_crop_split_review.txt`:
-   Gemini 3 Flash crop-level reduce/atomicity reviewer prompt over a
-   selected-candidate overlay. The current test asks only whether the
-   highlighted candidate contains multiple instances and can be split/reduced
-   further, or whether it is already atomic.
+   Skipped as an active pipeline stage after the subset test. The prompt and
+   runner are retained for reproducibility only. The reduce/atomicity question
+   proved ill posed for the current ROI because boxes do not need perfect
+   instance atomicity for detector distillation and crop filtering.
 8. `stage6_crop_true_false_positive.txt`:
-   Gemini 3 Flash high-thinking crop-level true-positive/false-positive prompt.
+   Next active crop-level stage: Gemini 3 Flash high-thinking crop-level
+   true-positive/false-positive prompt.
 9. `stage7_crop_bbox_adjustment.txt`:
    Gemini 3 Flash high-thinking crop-level bbox adjustment prompt. The
    deterministic loop maps `small` to 10% and `medium` to 25% side adjustments.
