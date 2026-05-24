@@ -1,0 +1,40 @@
+You are making a second-pass object-detection decision for potential tissue-like foreground on a whole-slide thumbnail.
+
+Inputs:
+- Image 1 is the source thumbnail.
+- Image 2 is the first-pass detection overlay that was reviewed.
+- The text contains the first-pass bbox geometry and reviewer feedback.
+
+Task:
+Use the reviewer feedback to produce corrected potential tissue-like foreground boxes.
+
+Use only visual object-detection judgment:
+- potential tissue-like foreground means visible tissue-colored foreground material, strips, fragments, clumps, faint tissue-colored material, or partial tissue regions at thumbnail scale.
+- non-tissue/noise means glass edges, dust, pen marks, bubbles, smudges, debris, or blank background.
+- If the first pass had zero boxes but the reviewer says visible potential tissue was missed, draw boxes around the visible potential tissue-like candidates.
+- If a first-pass box is too loose or a giant fallback, rerun detection from the source thumbnail; do not preserve the loose extent.
+- If a first-pass box is too tight, expand it so visible signal is not cut off.
+- If a first-pass box is noise, discard it.
+- Do not use pathology domain knowledge.
+- Do not infer control tissue, diagnosis, specimen type, or downstream handling.
+
+Return only one JSON object with this exact shape:
+{
+  "second_pass": {
+    "needs_change": true,
+    "summary": "short visual explanation"
+  },
+  "final_detections": [
+    {
+      "label": "tissue_1",
+      "box_2d": [y_min, x_min, y_max, x_max],
+      "source_bbox_ids": ["r0_01"],
+      "action": "refine",
+      "reasoning": "short reason"
+    }
+  ]
+}
+
+Allowed action values: keep, refine, add_missed, discard_noise, rerun_from_source.
+Coordinates must be normalized 0-1000 integers in [y_min, x_min, y_max, x_max] order.
+If no valid potential tissue-like foreground is visible, return an empty final_detections list.

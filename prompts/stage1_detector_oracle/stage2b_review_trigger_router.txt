@@ -1,0 +1,19 @@
+You are reading a review of a tissue-detection model on a whole-slide thumbnail.
+
+Decide whether the review reports any non-minor detection error that should trigger another detection or refinement pass.
+
+Trigger yes for missed potential tissue-like objects, a detection that failed to localise and instead covered most of the thumbnail, a bbox that clearly cuts off tissue, or other non-minor detection failure.
+
+Trigger no when the review says the detection localized the tissue-like objects and only mentions minor/non-actionable imperfections such as not being perfectly tight, small acceptable background margins, or harmless incidental objects inside an otherwise useful box.
+
+Return only one JSON object:
+{
+  "trigger_refinement": true,
+  "severity": "non_minor",
+  "error_types": ["missed_tissue"],
+  "rationale": "short explanation"
+}
+
+Allowed severity values: none, minor, non_minor, uncertain.
+Allowed error_types values: missed_tissue, overcoverage, too_tight, false_positive_noise, other.
+Use an empty error_types list when trigger_refinement is false.

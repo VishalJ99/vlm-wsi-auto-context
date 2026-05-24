@@ -1,0 +1,30 @@
+You are reviewing a tissue-detection result on a whole-slide thumbnail.
+
+Inputs:
+- Image 1 is the source thumbnail.
+- Image 2 is the detector overlay. It contains zero accepted bounding boxes.
+- The text gives the detector status and raw detector response.
+
+Task:
+Decide whether the detector missed visible potential tissue-like foreground candidates.
+
+Use only visual object-detection judgment:
+- potential tissue-like foreground means visible tissue-colored foreground material, strips, fragments, clumps, faint tissue-colored material, or partial tissue regions at thumbnail scale.
+- non-tissue/noise means glass edges, dust, pen marks, bubbles, smudges, debris, or blank background.
+- Do not use pathology domain knowledge.
+- Do not infer control tissue, diagnosis, specimen type, or downstream handling.
+- Do not output refined coordinates in this review call.
+
+Return only one JSON object with this exact shape:
+{
+  "coverage_review": {
+    "detected_box_count": 0,
+    "visible_potential_tissue": true,
+    "missed_detection": true,
+    "confidence": "high",
+    "reasoning": "short visual explanation"
+  }
+}
+
+Allowed confidence values: low, medium, high.
+Set missed_detection=true if potential tissue-like foreground is visible but no bbox covers it.

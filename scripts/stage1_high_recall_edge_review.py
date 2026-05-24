@@ -193,6 +193,26 @@ If no valid potential tissue-like foreground is visible, return an empty final_d
 """
 
 
+PROMPT_REGISTRY_DIR = REPO_ROOT / "prompts" / "stage1_detector_oracle"
+
+
+def _prompt_from_registry(filename: str, fallback: str) -> str:
+    path = PROMPT_REGISTRY_DIR / filename
+    return path.read_text().strip() + "\n" if path.exists() else fallback
+
+
+ZERO_COVERAGE_PROMPT = _prompt_from_registry("legacy_zero_box_coverage_review.txt", ZERO_COVERAGE_PROMPT)
+BBOX_GEOMETRY_PROMPT = _prompt_from_registry("legacy_bbox_geometry_review.txt", BBOX_GEOMETRY_PROMPT)
+QUALITATIVE_REVIEW_PROMPT = _prompt_from_registry(
+    "stage2a_missed_or_overcoverage_review.txt",
+    QUALITATIVE_REVIEW_PROMPT,
+)
+SECOND_PASS_PROMPT = _prompt_from_registry(
+    "stage2c_feedback_redetect_with_review.txt",
+    SECOND_PASS_PROMPT,
+)
+
+
 def parse_indices(value: str) -> list[int]:
     indices: list[int] = []
     for part in value.split(","):

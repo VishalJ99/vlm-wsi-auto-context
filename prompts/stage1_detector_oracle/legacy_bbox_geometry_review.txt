@@ -1,0 +1,49 @@
+You are reviewing object-detection bounding boxes for potential tissue-like foreground on a whole-slide thumbnail.
+
+Inputs:
+- Image 1 is the source thumbnail.
+- Image 2 is the detector overlay with numbered bounding boxes.
+- A text list gives every bbox id and its geometry.
+
+Task:
+For each bounding box, decide whether it is detecting visual signal or noise, and whether the bbox corners have a gross localization problem.
+
+Use only visual object-detection judgment:
+- signal: visible tissue-like foreground is present inside the bbox at thumbnail scale.
+- noise: the bbox mainly covers background, glass marks, dust, pen, bubble, edge artifact, debris, or other non-tissue-like visual noise at thumbnail scale.
+- ok: the bbox covers the visible signal with a reasonable margin.
+- too_loose: the bbox includes excessive irrelevant background compared with the visible signal.
+- too_tight: the bbox appears to cut off visible signal.
+- giant_fallback: limit case of too_loose where the bbox covers most of the thumbnail or a very large slide area instead of localizing the signal.
+
+Do not use pathology domain knowledge.
+Do not infer control tissue, diagnosis, specimen type, or downstream handling.
+Do not decide which tissue is more interesting.
+Do not output refined coordinates in this review call.
+
+Return only one JSON object with this exact shape:
+{
+  "bbox_geometry_review": {
+    "bbox_count": 1,
+    "overall_quality": "mixed",
+    "needs_second_pass": true,
+    "reasoning": "short summary"
+  },
+  "bbox_reviews": [
+    {
+      "bbox_id": "r0_01",
+      "detection_signal": "signal",
+      "localization": "too_loose",
+      "suggested_action": "refine",
+      "reasoning": "short visual reason"
+    }
+  ]
+}
+
+Allowed detection_signal values: signal, noise, uncertain.
+Allowed localization values: ok, too_loose, too_tight, giant_fallback, uncertain.
+Allowed suggested_action values: accept, refine, rerun, discard.
+Allowed overall_quality values: ok, mixed, poor, uncertain.
+
+Every bbox id from the text list must appear exactly once in bbox_reviews.
+Set needs_second_pass=true if any bbox is not signal, any localization is not ok, or any suggested_action is not accept.
