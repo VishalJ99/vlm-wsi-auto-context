@@ -99,6 +99,10 @@ def _parse_router_response(raw: str) -> dict[str, Any]:
         binary_answer = True
     elif re.match(r"^\s*no\b", normalized):
         binary_answer = False
+    else:
+        answer_match = re.search(r'"answer"\s*:\s*"(yes|no)"', raw, flags=re.IGNORECASE)
+        if answer_match:
+            binary_answer = answer_match.group(1).lower() == "yes"
 
     fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.IGNORECASE | re.DOTALL)
     json_text = fenced.group(1).strip() if fenced else raw

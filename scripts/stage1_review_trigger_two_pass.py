@@ -147,6 +147,8 @@ def _call_two_pass(
         "first_parsed_response": {},
         "second_raw_response": "",
         "second_parsed_response": {},
+        "ran_second_pass": False,
+        "second_pass_skip_reason": "",
         "first_non_minor_detection_failure": "",
         "first_justification": "",
         "final_non_minor_detection_failure": "",
@@ -169,20 +171,40 @@ def _call_two_pass(
             reasoning_effort=args.reasoning_effort,
         )
         first_parsed = _parse_router_response(first_raw)
-        second_raw, second_usage, second_response_model = _chat_text(
-            model=args.model,
-            prompt_text=_second_prompt(second_prompt_template, record, first_raw, first_parsed),
-            temperature=args.temperature,
-            max_tokens=args.second_max_tokens,
-            base_url=base_url,
-            api_key=api_key,
-            reasoning_effort=args.reasoning_effort,
-        )
-        second_parsed = _parse_router_response(second_raw)
+        if first_parsed.get("non_minor_detection_failure") is False:
+            second_raw = ""
+            second_usage: dict[str, Any] = {}
+            second_response_model = ""
+            second_parsed = {
+                "answer": "no",
+                "non_minor_detection_failure": False,
+                "trigger_refinement": False,
+                "severity": "none",
+                "error_types": [],
+                "justification": "Skipped because the first pass answered no.",
+                "rationale": "Skipped because the first pass answered no.",
+            }
+            ran_second_pass = False
+            second_pass_skip_reason = "first_pass_no"
+        else:
+            second_raw, second_usage, second_response_model = _chat_text(
+                model=args.model,
+                prompt_text=_second_prompt(second_prompt_template, record, first_raw, first_parsed),
+                temperature=args.temperature,
+                max_tokens=args.second_max_tokens,
+                base_url=base_url,
+                api_key=api_key,
+                reasoning_effort=args.reasoning_effort,
+            )
+            second_parsed = _parse_router_response(second_raw)
+            ran_second_pass = True
+            second_pass_skip_reason = ""
         output.update(
             {
                 "first_raw_response": first_raw,
                 "first_parsed_response": first_parsed,
+                "ran_second_pass": ran_second_pass,
+                "second_pass_skip_reason": second_pass_skip_reason,
                 "second_raw_response": second_raw,
                 "second_parsed_response": second_parsed,
                 "first_non_minor_detection_failure": first_parsed.get("non_minor_detection_failure"),
@@ -226,6 +248,8 @@ def _csv_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "case_display": row.get("case_display", ""),
                 "first_non_minor_detection_failure": row.get("first_non_minor_detection_failure", ""),
                 "first_justification": row.get("first_justification", ""),
+                "ran_second_pass": row.get("ran_second_pass", ""),
+                "second_pass_skip_reason": row.get("second_pass_skip_reason", ""),
                 "final_non_minor_detection_failure": row.get("final_non_minor_detection_failure", ""),
                 "final_answer": row.get("final_answer", ""),
                 "final_justification": row.get("final_justification", ""),
@@ -269,6 +293,8 @@ def _summary(results: list[dict[str, Any]], args: argparse.Namespace, output_roo
         "final_non_minor_detection_failure_counts": dict(
             Counter(str(row.get("final_non_minor_detection_failure")) for row in results)
         ),
+        "ran_second_pass": sum(1 for row in results if row.get("ran_second_pass")),
+        "second_pass_skip_counts": dict(Counter(str(row.get("second_pass_skip_reason", "")) for row in results)),
         "first_total_tokens": first_tokens,
         "second_total_tokens": second_tokens,
         "total_tokens": first_tokens + second_tokens,
@@ -392,6 +418,8 @@ def main() -> None:
             "case_display",
             "first_non_minor_detection_failure",
             "first_justification",
+            "ran_second_pass",
+            "second_pass_skip_reason",
             "final_non_minor_detection_failure",
             "final_answer",
             "final_justification",
