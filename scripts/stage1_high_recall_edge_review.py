@@ -56,23 +56,12 @@ HIGH_RECALL_PROMPT = REPO_ROOT / "prompts" / "stage1_high_recall_potential_tissu
 ZERO_COVERAGE_PROMPT_VERSION = "stage1_high_recall_zero_coverage_review_v1_2026-05-24"
 BBOX_GEOMETRY_PROMPT_VERSION = "stage1_high_recall_bbox_geometry_review_v1_2026-05-24"
 SECOND_PASS_PROMPT_VERSION = "stage1_high_recall_edge_second_pass_v1_2026-05-24"
-QUALITATIVE_REVIEW_PROMPT_VERSION = "stage1_high_recall_qualitative_review_v1_2026-05-24"
+QUALITATIVE_REVIEW_PROMPT_VERSION = "stage1_high_recall_short_coverage_overcoverage_review_v1_2026-05-24"
 
 QUALITATIVE_REVIEW_PROMPT = """\
 You are looking at a whole-slide thumbnail and a tissue-detection overlay.
 
-Describe what the detector did in plain language.
-
-Focus on:
-- whether visible tissue-like regions are covered or missed
-- whether any box covers most or all of the thumbnail rather than a local visible signal
-- whether boxes are grossly too broad or too narrow
-- whether boxes seem to cover background/noise rather than tissue-like signal
-
-Use the numbered boxes in the overlay when useful.
-If there are no boxes, say whether visible tissue-like material is still present.
-Do not name the specimen type; describe only the visual detection result.
-Keep the answer concise and concrete. No JSON is needed.
+Check if any potential tissue-like objects were missed or if the detection failed to localise and instead just encompasses everything.
 """
 
 ZERO_COVERAGE_PROMPT = """\
@@ -361,13 +350,7 @@ def _build_tasks(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def _review_prompt(task: dict[str, Any], args: argparse.Namespace) -> tuple[str, str]:
     if args.qualitative_only:
-        text = (
-            QUALITATIVE_REVIEW_PROMPT
-            + "\n\nCase:\n"
-            + task["case_display"]
-            + f"\n\nDetected bbox count: {task['reviewed_bbox_count']}"
-        )
-        return QUALITATIVE_REVIEW_PROMPT_VERSION, text
+        return QUALITATIVE_REVIEW_PROMPT_VERSION, QUALITATIVE_REVIEW_PROMPT
     base = (
         "\n\nCase:\n"
         + task["case_display"]
