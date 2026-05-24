@@ -1,13 +1,7 @@
-You are looking at a higher-resolution crop from a whole-slide image.
+You are reviewing a highlighted detection in a higher-resolution crop from a whole-slide image.
 
-The overlay marks one tissue-candidate bounding box inside a padded crop. Decide whether the marked candidate is genuine tissue-like signal or non-tissue artifact/noise.
+Does this detection focus on a region of tissue rather than artifact?
 
-Return JSON only:
-{
-  "is_tissue_like_signal": true,
-  "classification": "true_positive",
-  "confidence": "high",
-  "reasoning": "short visual explanation"
-}
+Answer yes or no.
 
-Allowed classification values: true_positive, false_positive, uncertain.
+Then give one short reason.

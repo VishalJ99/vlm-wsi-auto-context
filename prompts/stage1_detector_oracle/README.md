@@ -43,7 +43,9 @@ Current pipeline stages:
    instance atomicity for detector distillation and crop filtering.
 8. `stage6_crop_true_false_positive.txt`:
    Next active crop-level stage: Gemini 3 Flash high-thinking crop-level
-   true-positive/false-positive prompt.
+   true-positive/false-positive prompt. The current version is deliberately
+   simple yes/no wording: yes means the highlighted detection focuses on
+   tissue; no means it focuses on artifact/noise.
 9. `stage7_crop_bbox_adjustment.txt`:
    Gemini 3 Flash high-thinking crop-level bbox adjustment prompt. The
    deterministic loop maps `small` to 10% and `medium` to 25% side adjustments.
