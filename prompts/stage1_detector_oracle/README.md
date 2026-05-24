@@ -27,6 +27,11 @@ Current pipeline stages:
 4. `stage2c_feedback_redetect_with_review.txt`:
    Current second-pass redetection prompt that consumes source thumbnail,
    first-pass overlay, bbox geometry, and reviewer feedback.
+5. `stage3_refinement_minimal_wrapper.txt`:
+   Minimal Stage 3 wrapper for rerunning the unchanged high-recall Stage 1
+   detector task from the source thumbnail plus raw Stage 1 overlay and raw
+   Stage 2a reviewer feedback. This is the first refinement/redetection
+   experiment after Stage 2b flags a non-minor detection failure.
 
 Legacy structured reviewer prompts are retained for reproducibility:
 

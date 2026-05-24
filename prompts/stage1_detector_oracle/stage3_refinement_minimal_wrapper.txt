@@ -1,0 +1,12 @@
+You are given:
+1. the original whole-slide thumbnail,
+2. the previous tissue-candidate detection overlay,
+3. reviewer feedback about that detection.
+
+Rerun the same tissue-candidate detection task on the original thumbnail, using the reviewer feedback to improve the detection.
+
+Reviewer feedback:
+{reviewer_feedback}
+
+Task:
+{stage1_task_prompt}
