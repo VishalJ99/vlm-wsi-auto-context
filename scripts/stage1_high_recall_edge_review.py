@@ -56,6 +56,24 @@ HIGH_RECALL_PROMPT = REPO_ROOT / "prompts" / "stage1_high_recall_potential_tissu
 ZERO_COVERAGE_PROMPT_VERSION = "stage1_high_recall_zero_coverage_review_v1_2026-05-24"
 BBOX_GEOMETRY_PROMPT_VERSION = "stage1_high_recall_bbox_geometry_review_v1_2026-05-24"
 SECOND_PASS_PROMPT_VERSION = "stage1_high_recall_edge_second_pass_v1_2026-05-24"
+QUALITATIVE_REVIEW_PROMPT_VERSION = "stage1_high_recall_qualitative_review_v1_2026-05-24"
+
+QUALITATIVE_REVIEW_PROMPT = """\
+You are looking at a whole-slide thumbnail and a tissue-detection overlay.
+
+Describe what the detector did in plain language.
+
+Focus on:
+- whether visible tissue-like regions are covered or missed
+- whether any box covers most or all of the thumbnail rather than a local visible signal
+- whether boxes are grossly too broad or too narrow
+- whether boxes seem to cover background/noise rather than tissue-like signal
+
+Use the numbered boxes in the overlay when useful.
+If there are no boxes, say whether visible tissue-like material is still present.
+Do not name the specimen type; describe only the visual detection result.
+Keep the answer concise and concrete. No JSON is needed.
+"""
 
 ZERO_COVERAGE_PROMPT = """\
 You are reviewing a tissue-detection result on a whole-slide thumbnail.
@@ -341,7 +359,15 @@ def _build_tasks(args: argparse.Namespace) -> list[dict[str, Any]]:
     return tasks
 
 
-def _review_prompt(task: dict[str, Any]) -> tuple[str, str]:
+def _review_prompt(task: dict[str, Any], args: argparse.Namespace) -> tuple[str, str]:
+    if args.qualitative_only:
+        text = (
+            QUALITATIVE_REVIEW_PROMPT
+            + "\n\nCase:\n"
+            + task["case_display"]
+            + f"\n\nDetected bbox count: {task['reviewed_bbox_count']}"
+        )
+        return QUALITATIVE_REVIEW_PROMPT_VERSION, text
     base = (
         "\n\nCase:\n"
         + task["case_display"]
@@ -372,7 +398,7 @@ def _call_review(
     base_url: str,
     api_key: str,
 ) -> dict[str, Any]:
-    prompt_version, prompt_text = _review_prompt(task)
+    prompt_version, prompt_text = _review_prompt(task, args)
     record = {
         "task_id": task["task_id"],
         "case_index": task["case_index"],
@@ -382,6 +408,7 @@ def _call_review(
         "prompt_version": prompt_version,
         "model": args.model,
         "reasoning_effort": args.reasoning_effort or "",
+        "qualitative_only": args.qualitative_only,
         "thumbnail_path": task["thumbnail_path"],
         "review_overlay_path": task["review_overlay_path"],
         "thumbnail_size": task["thumbnail_size"],
@@ -403,7 +430,7 @@ def _call_review(
             reasoning_effort=args.reasoning_effort,
         )
         record["raw_response"] = raw
-        record["parsed_response"] = _extract_json_object(raw)
+        record["parsed_response"] = {"raw_text": raw} if args.qualitative_only else _extract_json_object(raw)
         record["usage"] = usage
         record["response_model"] = response_model
     except Exception as exc:
@@ -431,6 +458,8 @@ def _bbox_reviews(parsed: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _needs_second_pass(review: dict[str, Any]) -> tuple[bool, str]:
+    if review.get("qualitative_only"):
+        return False, "qualitative_only_no_second_pass"
     if review.get("error"):
         return False, "review_error"
     parsed = review.get("parsed_response") if isinstance(review.get("parsed_response"), dict) else {}
@@ -587,6 +616,7 @@ def _summary_rows(
                 "case_index": review.get("case_index", ""),
                 "case_display": review.get("case_display", ""),
                 "kind": review.get("kind", ""),
+                "qualitative_review": parsed.get("raw_text", ""),
                 "reviewed_bbox_count": review.get("reviewed_bbox_count", ""),
                 "review_error": review.get("error", ""),
                 "visible_potential_tissue": coverage.get("visible_potential_tissue", ""),
@@ -624,6 +654,9 @@ def _draw_parsed_review(
     parsed: dict[str, Any],
     font: Any,
 ) -> int:
+    raw_text = parsed.get("raw_text")
+    if raw_text:
+        return _draw_wrapped(draw, (60, y), str(raw_text), font, 180, "#111111")
     coverage = _coverage_review(parsed)
     if coverage:
         return _draw_wrapped(
@@ -691,7 +724,8 @@ def _write_pdf(
         (45, y),
         (
             f"cases={','.join(str(i) for i in args.indices)} | model={args.model} | "
-            f"reasoning={args.reasoning_effort or 'unspecified'} | ticket=PER-207"
+            f"reasoning={args.reasoning_effort or 'unspecified'} | "
+            f"qualitative_only={args.qualitative_only} | ticket=PER-207"
         ),
         body_font,
         150,
@@ -708,11 +742,19 @@ def _write_pdf(
     _draw_wrapped(
         draw,
         (65, y),
-        f"{ZERO_COVERAGE_PROMPT_VERSION}; {BBOX_GEOMETRY_PROMPT_VERSION}; {SECOND_PASS_PROMPT_VERSION}",
+        (
+            f"{ZERO_COVERAGE_PROMPT_VERSION}; {BBOX_GEOMETRY_PROMPT_VERSION}; "
+            f"{SECOND_PASS_PROMPT_VERSION}; {QUALITATIVE_REVIEW_PROMPT_VERSION}"
+        ),
         small_font,
         170,
         "#111111",
     )
+    if args.qualitative_only:
+        y += 40
+        draw.text((45, y), "Qualitative reviewer prompt", font=body_font, fill="black")
+        y += 32
+        _draw_wrapped(draw, (65, y), QUALITATIVE_REVIEW_PROMPT.strip(), small_font, 170, "#111111")
     pages.append(title)
 
     for task in tasks:
@@ -727,7 +769,8 @@ def _write_pdf(
         y += 44
         header = (
             f"kind={task['kind']} | reviewed_boxes={task['reviewed_bbox_count']} | "
-            f"trigger={trigger} | second_pass={second.get('ran_second_pass', False)}"
+            f"trigger={trigger} | qualitative_only={args.qualitative_only} | "
+            f"second_pass={second.get('ran_second_pass', False)}"
         )
         y = _draw_wrapped(draw, (45, y), header, body_font, 170, "#111111")
         y += 18
@@ -820,6 +863,8 @@ def _write_reproduction(
             "--reasoning-effort",
             args.reasoning_effort,
         ]
+    if args.qualitative_only:
+        command[command.index("--max-concurrent"):command.index("--max-concurrent")] = ["--qualitative-only"]
     text = f"""\
 High-recall Stage 1 edge reviewer probe
 =======================================
@@ -829,6 +874,7 @@ Git commit: {_repo_git_commit()}
 Ticket: PER-207
 Model: {args.model}
 Reasoning effort: {args.reasoning_effort or 'unspecified'}
+Qualitative only: {args.qualitative_only}
 Max tokens: {args.max_tokens}
 Second-pass max tokens: {args.second_max_tokens}
 Cases CSV: {args.cases_csv.resolve()}
@@ -847,6 +893,10 @@ Reviewer prompt versions:
 - Zero-box coverage: {ZERO_COVERAGE_PROMPT_VERSION}
 - Bbox geometry: {BBOX_GEOMETRY_PROMPT_VERSION}
 - Second pass: {SECOND_PASS_PROMPT_VERSION}
+- Qualitative review: {QUALITATIVE_REVIEW_PROMPT_VERSION}
+
+Qualitative reviewer prompt text:
+{QUALITATIVE_REVIEW_PROMPT.strip() if args.qualitative_only else 'not used'}
 
 Outputs:
 - Tasks: {tasks_path}
@@ -863,7 +913,8 @@ Notes:
 - Case 22 is reviewed as a zero-box coverage failure candidate.
 - Case 34 is reviewed on the final Stage 1 padded/merged bboxes, not only the raw detector boxes.
 - Case 50 is reviewed on the raw giant bbox that Stage 1 rejected, to test whether the reviewer can catch a giant fallback box and route a second-pass redetection.
-- Prompts avoid pathology/control-tissue semantics and use visual object-detection language only.
+- Structured prompts avoid pathology/control-tissue semantics and use visual object-detection language only.
+- Qualitative-only mode asks for a natural-language detection description and does not run the second-pass refiner.
 """
     (output_root / "reproduction.txt").write_text(text)
 
@@ -908,6 +959,7 @@ def run(args: argparse.Namespace) -> int:
             "case_index",
             "case_display",
             "kind",
+            "qualitative_review",
             "reviewed_bbox_count",
             "review_error",
             "visible_potential_tissue",
@@ -935,6 +987,7 @@ def run(args: argparse.Namespace) -> int:
         "ticket": "PER-207",
         "model": args.model,
         "reasoning_effort": args.reasoning_effort or "",
+        "qualitative_only": args.qualitative_only,
         "max_tokens": args.max_tokens,
         "second_max_tokens": args.second_max_tokens,
         "cases": len(case_rows),
@@ -964,6 +1017,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=1200)
     parser.add_argument("--second-max-tokens", type=int, default=1800)
     parser.add_argument("--max-concurrent", type=int, default=3)
+    parser.add_argument("--qualitative-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
