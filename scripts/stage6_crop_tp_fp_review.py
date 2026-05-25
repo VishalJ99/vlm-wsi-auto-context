@@ -128,7 +128,7 @@ def _parse_tissue_yes_no(text: str) -> tuple[str, str]:
 
     lowered = cleaned.lower().strip()
     lowered = re.sub(r"^[#>*\-\s]+", "", lowered)
-    first = re.match(r"^(yes|no|y|n)\b", lowered)
+    first = re.match(r"^(?:thought|answer|decision)?\s*(yes|no|y|n)\b", lowered)
     if first:
         token = first.group(1)
         return ("yes" if token in {"yes", "y"} else "no"), "leading_token"

@@ -42,13 +42,17 @@ Current pipeline stages:
    proved ill posed for the current ROI because boxes do not need perfect
    instance atomicity for detector distillation and crop filtering.
 8. `stage6_crop_true_false_positive.txt`:
-   Next active crop-level stage: Gemini 3 Flash high-thinking crop-level
+   Current crop-level stage: Gemini 3 Flash high-thinking crop-level
    true-positive/false-positive prompt. The current version is deliberately
    simple yes/no wording: yes means the highlighted detection focuses on
-   tissue; no means it focuses on artifact/noise.
+   tissue; no means it focuses on artifact/noise. The pilot-100 final detector
+   packet filters to yes decisions, merges remaining boxes with standard IoU
+   `>0.40`, then expands final boxes by 10%.
 9. `stage7_crop_bbox_adjustment.txt`:
-   Gemini 3 Flash high-thinking crop-level bbox adjustment prompt. The
-   deterministic loop maps `small` to 10% and `medium` to 25% side adjustments.
+   Skipped as an active pipeline stage after Stage 6 validation because the
+   agentic bbox-adjustment loop is too heavy for this detector-oracle phase.
+   The prompt is retained only as a parked experiment; the current finalization
+   uses deterministic merge-plus-margin postprocessing instead.
 
 Legacy structured reviewer prompts are retained for reproducibility:
 
