@@ -33,7 +33,7 @@ DEFAULT_OUTPUT_PARENT = (
     / "stage6_crop_tissue_artifact_review_v1"
 )
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
-PROMPT_VERSION = "stage6_crop_contains_tissue_yes_no_2026-05-25"
+PROMPT_VERSION = "stage6_crop_contains_tissue_minimal_yes_no_2026-05-25"
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

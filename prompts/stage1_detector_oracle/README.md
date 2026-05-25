@@ -47,9 +47,11 @@ Current pipeline stages:
    simple yes/no wording: yes means the highlighted detection contains tissue;
    no means it does not contain tissue. This replaced the stricter
    tissue-versus-artifact-focus wording after selected-case debugging showed
-   stable false negatives for mixed tissue-plus-ink crops. The pilot-100 final
-   detector packet filters to yes decisions, merges remaining boxes with
-   standard IoU `>0.40`, then expands final boxes by 10%.
+   stable false negatives for mixed tissue-plus-ink crops. The active wording
+   is the minimal version: "You are reviewing a highlighted detection from a
+   whole-slide image. Does this detection contain tissue? Answer yes or no."
+   The pilot-100 final detector packet filters to yes decisions, merges
+   remaining boxes with standard IoU `>0.40`, then expands final boxes by 10%.
 9. `stage7_crop_bbox_adjustment.txt`:
    Skipped as an active pipeline stage after Stage 6 validation because the
    agentic bbox-adjustment loop is too heavy for this detector-oracle phase.
