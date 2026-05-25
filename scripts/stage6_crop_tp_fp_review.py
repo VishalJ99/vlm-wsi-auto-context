@@ -133,9 +133,17 @@ def _parse_tissue_yes_no(text: str) -> tuple[str, str]:
         token = first.group(1)
         return ("yes" if token in {"yes", "y"} else "no"), "leading_token"
 
+    markdown_answer = re.search(r"(?:answer|assessment|provided)?[^a-z0-9]{0,80}\*\*\s*(yes|no)\.?\s*\*\*", lowered[:400])
+    if markdown_answer:
+        return markdown_answer.group(1), "markdown_bold_answer"
+
     answer_match = re.search(r"\b(answer|decision)\s*[:\-]\s*(yes|no)\b", lowered)
     if answer_match:
         return answer_match.group(2), "answer_label"
+
+    start_with_match = re.search(r"\bstart with [\"'`*]*\s*(yes|no)\.?\s*[\"'`*]*", lowered[:500])
+    if start_with_match:
+        return start_with_match.group(1), "start_with_instruction"
 
     if "true_positive" in lowered:
         return "yes", "text_true_positive"
