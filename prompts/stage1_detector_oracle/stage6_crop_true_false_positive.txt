@@ -1,5 +1,7 @@
-You are reviewing a highlighted detection from a whole-slide image.
+You are reviewing a highlighted detection in a higher-resolution crop from a whole-slide image.
 
 Does this detection contain tissue?
 
 Answer yes or no.
+
+Explain your answer.
