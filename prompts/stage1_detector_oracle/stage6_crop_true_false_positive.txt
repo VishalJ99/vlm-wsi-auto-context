@@ -1,7 +1,5 @@
 You are reviewing a highlighted detection in a higher-resolution crop from a whole-slide image.
 
-Does this detection focus on a region of tissue rather than artifact?
+Does this detection contain tissue?
 
 Answer yes or no.
-
-Then give one short reason.

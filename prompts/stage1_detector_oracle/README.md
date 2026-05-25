@@ -44,10 +44,12 @@ Current pipeline stages:
 8. `stage6_crop_true_false_positive.txt`:
    Current crop-level stage: Gemini 3 Flash high-thinking crop-level
    true-positive/false-positive prompt. The current version is deliberately
-   simple yes/no wording: yes means the highlighted detection focuses on
-   tissue; no means it focuses on artifact/noise. The pilot-100 final detector
-   packet filters to yes decisions, merges remaining boxes with standard IoU
-   `>0.40`, then expands final boxes by 10%.
+   simple yes/no wording: yes means the highlighted detection contains tissue;
+   no means it does not contain tissue. This replaced the stricter
+   tissue-versus-artifact-focus wording after selected-case debugging showed
+   stable false negatives for mixed tissue-plus-ink crops. The pilot-100 final
+   detector packet filters to yes decisions, merges remaining boxes with
+   standard IoU `>0.40`, then expands final boxes by 10%.
 9. `stage7_crop_bbox_adjustment.txt`:
    Skipped as an active pipeline stage after Stage 6 validation because the
    agentic bbox-adjustment loop is too heavy for this detector-oracle phase.

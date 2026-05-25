@@ -33,7 +33,7 @@ DEFAULT_OUTPUT_PARENT = (
     / "stage6_crop_tissue_artifact_review_v1"
 )
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
-PROMPT_VERSION = "stage6_crop_tissue_artifact_yes_no_2026-05-24"
+PROMPT_VERSION = "stage6_crop_contains_tissue_yes_no_2026-05-25"
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -98,7 +98,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 def _parse_tissue_yes_no(text: str) -> tuple[str, str]:
     """Return yes/no/unknown plus parser route.
 
-    The prompt defines yes as "focuses on tissue" and no as "artifact/noise".
+    The prompt defines yes as "contains tissue" and no as "does not contain tissue".
     """
     cleaned = _strip_fences(text)
     payload = _extract_json_object(cleaned)
