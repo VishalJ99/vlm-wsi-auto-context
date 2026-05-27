@@ -70,6 +70,10 @@ Exploratory prompt:
   One-line raw-output version of the same case-99 localization-quality probe.
   The full prompt text is exactly: `Review the quality of the localisation
   around the tissue within highlighted region`.
+- `stage6_final_box_shrinkability_raw.txt`:
+  One-line raw-output version of the case-99 final-box shrinkability probe. The
+  full prompt text is exactly: `could the box be made smaller without clipping
+  the extremeties of the tissue it is focused on?`.
 
 Legacy structured reviewer prompts are retained for reproducibility:
 
