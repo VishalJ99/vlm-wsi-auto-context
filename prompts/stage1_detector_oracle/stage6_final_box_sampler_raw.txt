@@ -1,0 +1,1 @@
+You are looking at selected regions of tissue in a whole slide image, your task is to choose up to 3 regions that cover the diversity of observed tissue best and where possible choosing regions with artifacts / noise to create an interesting donwstream dataset.

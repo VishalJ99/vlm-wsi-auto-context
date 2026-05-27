@@ -71,3 +71,13 @@ review/refine/filter prompt:
 
 Approve, revise, or discard this proposed task-scope split before making it the
 stable Stage 1 detector-oracle contract.
+
+## 2026-05-27 Update
+
+Treat final-box split/reduce logic as an open challenge rather than a blocker
+for the current pilot labels. The blocker is not model strength alone; "tight"
+localization is unintuitive for elongated or curved tissue strips where the
+axis-aligned rectangle can be close to tissue extremities but still contain
+large white space. A brittle prompt-engineering route is likely possible, but
+the observed issue currently affects roughly `1/400` crops, so defer this until
+it becomes a measurable bottleneck.
