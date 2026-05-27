@@ -66,6 +66,10 @@ Exploratory prompt:
   should be split, should be contracted/expanded, or should be discarded. This
   is not an active pipeline replacement; it is a quick diagnostic for whether a
   postprocessing split/reduce stage is worth testing.
+- `stage6_localization_quality_raw_minimal.txt`:
+  One-line raw-output version of the same case-99 localization-quality probe.
+  The full prompt text is exactly: `Review the quality of the localisation
+  around the tissue within highlighted region`.
 
 Legacy structured reviewer prompts are retained for reproducibility:
 

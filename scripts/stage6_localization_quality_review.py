@@ -598,6 +598,13 @@ def _write_reproduction(
         )
     if comparison_pdf:
         output_lines.append(f"- Low-vs-high comparison PDF: {comparison_pdf.resolve()}")
+    reuse_note = ""
+    if args.reuse_existing:
+        reuse_note = """\
+
+To regenerate the paid model outputs from the source crop overlays, run the
+same command without `--reuse-existing`.
+"""
     text = f"""\
 Stage 6 localization-quality review
 ===================================
@@ -630,9 +637,7 @@ Inputs:
 
 Outputs:
 {chr(10).join(output_lines)}
-
-To regenerate the paid model outputs from the source crop overlays, run the
-same command without `--reuse-existing`.
+{reuse_note}
 """
     (output_root / "reproduction.txt").write_text(text)
 
