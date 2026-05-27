@@ -58,6 +58,15 @@ Current pipeline stages:
    The prompt is retained only as a parked experiment; the current finalization
    uses deterministic merge-plus-margin postprocessing instead.
 
+Exploratory prompt:
+
+- `stage6_localization_quality_review.txt`:
+  Case-99-motivated exploratory reviewer for judging whether a highlighted
+  Stage 4/Stage 6 candidate crop is well localized, too loose, too tight,
+  should be split, should be contracted/expanded, or should be discarded. This
+  is not an active pipeline replacement; it is a quick diagnostic for whether a
+  postprocessing split/reduce stage is worth testing.
+
 Legacy structured reviewer prompts are retained for reproducibility:
 
 - `legacy_zero_box_coverage_review.txt`

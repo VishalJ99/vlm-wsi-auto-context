@@ -1,0 +1,24 @@
+You are reviewing a highlighted detection in a higher-resolution crop from a whole-slide image.
+
+Review the quality of the localisation around the tissue within the highlighted region.
+
+Assess whether the highlighted rectangle is a good localization for the tissue, too loose/over-inclusive, too tight/cuts tissue, off-target/artifact, or combines multiple separated tissue regions that should be split and reduced.
+
+Ignore any small numeric label or annotation drawn near the rectangle corner; the target is the whole highlighted rectangle.
+
+Return JSON only:
+{
+  "localization_quality": "good",
+  "tissue_present": "yes",
+  "background_excess": "mild",
+  "needs_split": false,
+  "needs_contract": false,
+  "needs_expand": false,
+  "suggested_action": "keep",
+  "reasoning": "one or two concise sentences"
+}
+
+Allowed localization_quality values: good, acceptable, too_loose, too_tight, off_target_or_artifact, multiple_regions_should_split, unclear.
+Allowed tissue_present values: yes, no, unclear.
+Allowed background_excess values: none, mild, moderate, severe, unclear.
+Allowed suggested_action values: keep, contract, expand, split, discard, unclear.
