@@ -142,6 +142,14 @@ def _counts(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _is_raw_output_row(row: dict[str, Any]) -> bool:
+    return str(row.get("parse_status", "")) == "unparsed"
+
+
+def _is_raw_output_run(rows: list[dict[str, Any]]) -> bool:
+    return bool(rows) and all(_is_raw_output_row(row) for row in rows)
+
+
 def _case_groups(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
     grouped: dict[int, list[dict[str, Any]]] = {}
     for row in rows:
@@ -155,6 +163,9 @@ def _build_tasks(args: argparse.Namespace, prompt: str) -> list[dict[str, Any]]:
     rows = _read_csv(args.candidates)
     wanted = {int(v) for v in (args.indices or DEFAULT_INDICES)}
     rows = [row for row in rows if int(row["case_index"]) in wanted]
+    if args.candidate_orders:
+        wanted_orders = {int(v) for v in args.candidate_orders}
+        rows = [row for row in rows if int(row["candidate_order"]) in wanted_orders]
     tasks: list[dict[str, Any]] = []
     for row in rows:
         overlay = Path(row["selected_overlay_path"])
@@ -284,10 +295,14 @@ def _draw_effort_cover(results: list[dict[str, Any]], prompt: str, effort: str, 
     y += 58
     draw.text((65, y), f"model={args.model} | thinking={effort} | crops={len(results)}", font=body, fill="#111111")
     y += 36
-    draw.text((65, y), f"localization_quality={_counts(results, 'localization_quality')}", font=small, fill="#111111")
-    y += 30
-    draw.text((65, y), f"suggested_action={_counts(results, 'suggested_action')}", font=small, fill="#111111")
-    y += 42
+    if _is_raw_output_run(results):
+        draw.text((65, y), "Raw-output run: no structured labels were requested or parsed.", font=small, fill="#111111")
+        y += 42
+    else:
+        draw.text((65, y), f"localization_quality={_counts(results, 'localization_quality')}", font=small, fill="#111111")
+        y += 30
+        draw.text((65, y), f"suggested_action={_counts(results, 'suggested_action')}", font=small, fill="#111111")
+        y += 42
     draw.text((65, y), "Prompt", font=header, fill="black")
     y += 36
     y = _draw_wrapped(draw, (85, y), prompt, 150, small)
@@ -296,10 +311,11 @@ def _draw_effort_cover(results: list[dict[str, Any]], prompt: str, effort: str, 
     y += 36
     for case_index, rows in _case_groups(results).items():
         first = rows[0]
+        suffix = "raw outputs" if _is_raw_output_run(rows) else f"action={_counts(rows, 'suggested_action')}"
         y = _draw_wrapped(
             draw,
             (85, y),
-            f"{case_index}/100 | {first['case_display']} | n={len(rows)} | action={_counts(rows, 'suggested_action')}",
+            f"{case_index}/100 | {first['case_display']} | n={len(rows)} | {suffix}",
             150,
             small,
         )
@@ -316,19 +332,22 @@ def _draw_effort_page(row: dict[str, Any]) -> Image.Image:
     y = 45
     draw.text(
         (55, y),
-        f"{int(row['case_index']):03d} candidate {int(row['candidate_order']):02d} | {row['reasoning_effort']} | {row['suggested_action']}",
+        f"{int(row['case_index']):03d} candidate {int(row['candidate_order']):02d} | {row['reasoning_effort']}",
         font=title,
         fill="black",
     )
     y += 48
     y = _draw_wrapped(draw, (55, y), row["case_display"], 150, body)
     y += 14
-    details = (
-        f"quality={row['localization_quality']} | tissue={row['tissue_present']} | "
-        f"background={row['background_excess']} | split={row['needs_split']} | "
-        f"contract={row['needs_contract']} | expand={row['needs_expand']} | "
-        f"parse={row['parse_status']} | error={row['error']}"
-    )
+    if _is_raw_output_row(row):
+        details = f"raw model output | parse={row['parse_status']} | error={row['error']}"
+    else:
+        details = (
+            f"quality={row['localization_quality']} | tissue={row['tissue_present']} | "
+            f"background={row['background_excess']} | split={row['needs_split']} | "
+            f"contract={row['needs_contract']} | expand={row['needs_expand']} | "
+            f"parse={row['parse_status']} | error={row['error']}"
+        )
     y = _draw_wrapped(draw, (55, y), details, 170, body)
     y += 18
     draw.text((55, y), "Raw padded crop", font=header, fill="black")
@@ -339,13 +358,16 @@ def _draw_effort_page(row: dict[str, Any]) -> Image.Image:
     page.paste(raw, (55, y))
     page.paste(overlay, (1240, y))
     y += max(raw.size[1], overlay.size[1]) + 40
-    draw.text((55, y), "Parsed reasoning", font=header, fill="black")
-    y += 30
-    y = _draw_wrapped(draw, (75, y), row.get("reasoning", ""), 170, small)
-    y += 16
     draw.text((55, y), "Raw model output", font=header, fill="black")
     y += 30
-    _draw_wrapped(draw, (75, y), row.get("raw_response", ""), 170, small)
+    if _is_raw_output_row(row):
+        _draw_wrapped(draw, (75, y), row.get("raw_response", ""), 170, small)
+    else:
+        y = _draw_wrapped(draw, (75, y), row.get("reasoning", ""), 170, small)
+        y += 16
+        draw.text((55, y), "Full raw response", font=header, fill="black")
+        y += 30
+        _draw_wrapped(draw, (75, y), row.get("raw_response", ""), 170, small)
     return page
 
 
@@ -372,9 +394,13 @@ def _draw_comparison_cover(all_results: dict[str, list[dict[str, Any]]], prompt:
     total = len(next(iter(all_results.values()))) if all_results else 0
     draw.text((65, y), f"model={args.model} | efforts={efforts} | crops={total}", font=body, fill="#111111")
     y += 42
-    for effort, rows in all_results.items():
-        draw.text((85, y), f"{effort}: quality={_counts(rows, 'localization_quality')} action={_counts(rows, 'suggested_action')}", font=small, fill="#111111")
+    if all(_is_raw_output_run(rows) for rows in all_results.values()):
+        draw.text((85, y), "Raw-output run: no structured labels were requested or parsed.", font=small, fill="#111111")
         y += 28
+    else:
+        for effort, rows in all_results.items():
+            draw.text((85, y), f"{effort}: quality={_counts(rows, 'localization_quality')} action={_counts(rows, 'suggested_action')}", font=small, fill="#111111")
+            y += 28
     y += 26
     draw.text((65, y), "Prompt", font=header, fill="black")
     y += 36
@@ -421,16 +447,19 @@ def _draw_comparison_page(task: dict[str, Any], low: dict[str, Any] | None, high
         if row is None:
             _draw_wrapped(draw, (x, y + 34), "missing result", 80, body)
             continue
-        parsed = (
-            f"quality={row['localization_quality']} | action={row['suggested_action']} | "
-            f"background={row['background_excess']} | split={row['needs_split']} | "
-            f"contract={row['needs_contract']} | expand={row['needs_expand']}"
-        )
-        yy = _draw_wrapped(draw, (x, y + 34), parsed, 86, body, line_height=22)
-        yy += 12
-        yy = _draw_wrapped(draw, (x, yy), row.get("reasoning", ""), 86, small, line_height=20)
-        yy += 10
-        _draw_wrapped(draw, (x, yy), row.get("raw_response", ""), 86, small, line_height=20)
+        if _is_raw_output_row(row):
+            _draw_wrapped(draw, (x, y + 34), row.get("raw_response", ""), 86, small, line_height=20)
+        else:
+            parsed = (
+                f"quality={row['localization_quality']} | action={row['suggested_action']} | "
+                f"background={row['background_excess']} | split={row['needs_split']} | "
+                f"contract={row['needs_contract']} | expand={row['needs_expand']}"
+            )
+            yy = _draw_wrapped(draw, (x, y + 34), parsed, 86, body, line_height=22)
+            yy += 12
+            yy = _draw_wrapped(draw, (x, yy), row.get("reasoning", ""), 86, small, line_height=20)
+            yy += 10
+            _draw_wrapped(draw, (x, yy), row.get("raw_response", ""), 86, small, line_height=20)
     return page
 
 
@@ -559,23 +588,26 @@ def _write_reproduction(
     summaries: dict[str, dict[str, Any]],
     comparison_pdf: Path | None,
 ) -> None:
-    command = " ".join(
-        shlex.quote(part)
-        for part in [
-            "python",
-            "scripts/stage6_localization_quality_review.py",
-            "--candidates",
-            str(args.candidates.resolve()),
-            "--prompt",
-            str(args.prompt.resolve()),
-            "--output-root",
-            str(args.output_root.resolve()),
-            "--model",
-            args.model,
-            "--reasoning-efforts",
-            *args.reasoning_efforts,
-            "--indices",
-            *(str(v) for v in (args.indices or DEFAULT_INDICES)),
+    command_parts = [
+        "python",
+        "scripts/stage6_localization_quality_review.py",
+        "--candidates",
+        str(args.candidates.resolve()),
+        "--prompt",
+        str(args.prompt.resolve()),
+        "--output-root",
+        str(args.output_root.resolve()),
+        "--model",
+        args.model,
+        "--reasoning-efforts",
+        *args.reasoning_efforts,
+        "--indices",
+        *(str(v) for v in (args.indices or DEFAULT_INDICES)),
+    ]
+    if args.candidate_orders:
+        command_parts.extend(["--candidate-orders", *(str(v) for v in args.candidate_orders)])
+    command_parts.extend(
+        [
             "--max-concurrent",
             str(args.max_concurrent),
             "--max-tokens",
@@ -585,7 +617,8 @@ def _write_reproduction(
         ]
     )
     if args.reuse_existing:
-        command += " --reuse-existing"
+        command_parts.append("--reuse-existing")
+    command = " ".join(shlex.quote(part) for part in command_parts)
     selected_cases = sorted({int(task["case_index"]) for task in tasks})
     output_lines = []
     for effort, summary in summaries.items():
@@ -670,7 +703,17 @@ def run(args: argparse.Namespace) -> int:
         ],
     )
     if args.dry_run:
-        print(json.dumps({"dry_run": True, "tasks": len(tasks), "cases": sorted({t["case_index"] for t in tasks})}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "tasks": len(tasks),
+                    "cases": sorted({t["case_index"] for t in tasks}),
+                    "candidate_orders": sorted({t["candidate_order"] for t in tasks}),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     base_url = api_key = ""
@@ -725,6 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--reasoning-efforts", nargs="+", default=["low", "high"], choices=["low", "medium", "high"])
     parser.add_argument("--indices", type=int, nargs="*", default=None)
+    parser.add_argument("--candidate-orders", type=int, nargs="*", default=None)
     parser.add_argument("--api-base", default=None)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--api-key-stdin", action="store_true")

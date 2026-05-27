@@ -1,0 +1,2 @@
+Review the quality of the localisation around the tissue within highlighted region
+Good localisation means the extremities of the highlighted tissue cores are close to or touching the boundary of the highlighted region.
