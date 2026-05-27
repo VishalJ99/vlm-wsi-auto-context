@@ -30,6 +30,7 @@ output/
 wsi-agents.code-workspace
 icl_patch_pool/
 /output
+/out/
 
 # Environment
 .env
