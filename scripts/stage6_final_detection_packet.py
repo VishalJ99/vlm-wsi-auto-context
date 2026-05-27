@@ -44,14 +44,15 @@ DEFAULT_CANDIDATES = (
 DEFAULT_STAGE6_RESULTS = (
     REPO_ROOT
     / "runs/stage1_detector_pilot_v1/stage1_detection_review_v1"
-    / "stage6_all100_final_detector_v1/high_thinking/reviews/stage6_crop_tissue_artifact_high_thinking.jsonl"
+    / "stage6_all100_contains_explain_hires_prompt_v1"
+    / "high_thinking/reviews/stage6_crop_tissue_artifact_high_thinking.jsonl"
 )
 DEFAULT_OUTPUT_ROOT = (
     REPO_ROOT
     / "runs/stage1_detector_pilot_v1/stage1_detection_review_v1"
-    / "stage6_all100_final_detector_v1/final_packet"
+    / "stage6_all100_contains_explain_hires_prompt_v1/final_packet_containment_merge_v1"
 )
-PROMPT_VERSION = "stage6_final_detection_packet_2026-05-25"
+PROMPT_VERSION = "stage6_final_detection_packet_2026-05-27"
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -103,23 +104,34 @@ def _draw_wrapped(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, wid
     return y
 
 
-def _yxyx_iou(a: list[float], b: list[float]) -> float:
+def _yxyx_overlap_metrics(a: list[float], b: list[float]) -> tuple[float, float]:
     ay1, ax1, ay2, ax2 = a
     by1, bx1, by2, bx2 = b
     inter_y1, inter_x1 = max(ay1, by1), max(ax1, bx1)
     inter_y2, inter_x2 = min(ay2, by2), min(ax2, bx2)
     inter = max(0.0, inter_y2 - inter_y1) * max(0.0, inter_x2 - inter_x1)
     if inter <= 0:
-        return 0.0
+        return 0.0, 0.0
     area_a = max(0.0, ay2 - ay1) * max(0.0, ax2 - ax1)
     area_b = max(0.0, by2 - by1) * max(0.0, bx2 - bx1)
     denom = area_a + area_b - inter
-    return inter / denom if denom > 0 else 0.0
+    smaller = min(area_a, area_b)
+    iou = inter / denom if denom > 0 else 0.0
+    overlap_over_smaller = inter / smaller if smaller > 0 else 0.0
+    return iou, overlap_over_smaller
 
 
-def _merge_iou_yxyx(boxes: list[list[float]], threshold: float) -> tuple[list[list[float]], int]:
+def _yxyx_iou(a: list[float], b: list[float]) -> float:
+    return _yxyx_overlap_metrics(a, b)[0]
+
+
+def _merge_duplicate_yxyx(
+    boxes: list[list[float]],
+    iou_threshold: float,
+    containment_threshold: float,
+) -> tuple[list[list[float]], dict[str, int]]:
     merged = [list(map(float, box)) for box in boxes]
-    merge_events = 0
+    merge_counts = {"total": 0, "iou": 0, "containment": 0}
     changed = True
     while changed:
         changed = False
@@ -132,7 +144,10 @@ def _merge_iou_yxyx(boxes: list[list[float]], threshold: float) -> tuple[list[li
             for j in range(i + 1, len(merged)):
                 if j in used:
                     continue
-                if _yxyx_iou(hull, merged[j]) > threshold:
+                iou, overlap_over_smaller = _yxyx_overlap_metrics(hull, merged[j])
+                if iou > iou_threshold or (
+                    containment_threshold > 0.0 and overlap_over_smaller >= containment_threshold
+                ):
                     other = merged[j]
                     hull = [
                         min(hull[0], other[0]),
@@ -141,11 +156,15 @@ def _merge_iou_yxyx(boxes: list[list[float]], threshold: float) -> tuple[list[li
                         max(hull[3], other[3]),
                     ]
                     used.add(j)
-                    merge_events += 1
+                    merge_counts["total"] += 1
+                    if iou > iou_threshold:
+                        merge_counts["iou"] += 1
+                    else:
+                        merge_counts["containment"] += 1
                     changed = True
             out.append(hull)
         merged = out
-    return merged, merge_events
+    return merged, merge_counts
 
 
 def _expand_yxyx(box: list[float], frac: float) -> list[float]:
@@ -230,7 +249,11 @@ def _build_case_records(args: argparse.Namespace) -> tuple[list[dict[str, Any]],
         rows = sorted(grouped.get(case_index, []), key=lambda r: int(r["candidate_order"]))
         yes_rows = [r for r in rows if r["tissue_focus_decision"] == "yes"]
         boxes = [r["box_2d_yxyx_normalized"] for r in yes_rows]
-        merged, merge_events = _merge_iou_yxyx(boxes, args.merge_iou_threshold)
+        merged, merge_counts = _merge_duplicate_yxyx(
+            boxes,
+            args.merge_iou_threshold,
+            args.containment_overlap_threshold,
+        )
         expanded = [_expand_yxyx(box, args.expand_frac) for box in merged]
         final_overlay = _draw_boxes_on_thumbnail(
             Path(s1["thumbnail_path"]),
@@ -262,7 +285,10 @@ def _build_case_records(args: argparse.Namespace) -> tuple[list[dict[str, Any]],
             "stage6_unknown_count": sum(1 for r in rows if r["tissue_focus_decision"] == "unknown"),
             "pre_merge_yes_boxes": boxes,
             "post_filter_merge_iou_threshold": args.merge_iou_threshold,
-            "post_filter_merge_events": merge_events,
+            "post_filter_merge_containment_threshold": args.containment_overlap_threshold,
+            "post_filter_merge_events": merge_counts["total"],
+            "post_filter_iou_merge_events": merge_counts["iou"],
+            "post_filter_containment_merge_events": merge_counts["containment"],
             "post_merge_boxes_yxyx_normalized": merged,
             "final_expand_fraction": args.expand_frac,
             "final_boxes_yxyx_normalized": expanded,
@@ -283,6 +309,12 @@ def _build_case_records(args: argparse.Namespace) -> tuple[list[dict[str, Any]],
         "final_boxes": sum(len(r["final_boxes_yxyx_normalized"]) for r in case_records),
         "stage3_used_cases": [r["case_index"] for r in case_records if r["stage3_used"]],
         "merge_iou_threshold": args.merge_iou_threshold,
+        "merge_containment_overlap_threshold": args.containment_overlap_threshold,
+        "post_filter_merge_events": sum(r["post_filter_merge_events"] for r in case_records),
+        "post_filter_iou_merge_events": sum(r["post_filter_iou_merge_events"] for r in case_records),
+        "post_filter_containment_merge_events": sum(
+            r["post_filter_containment_merge_events"] for r in case_records
+        ),
         "final_expand_fraction": args.expand_frac,
     }
     return case_records, summary
@@ -338,7 +370,8 @@ def _draw_cover(summary: dict[str, Any], args: argparse.Namespace) -> Image.Imag
     lines = [
         f"Cases={summary['cases']} | Stage4 crop candidates={summary['stage4_candidates']} | Stage6 yes={summary['stage6_yes']} no={summary['stage6_no']} unknown={summary['stage6_unknown']}",
         f"Final boxes={summary['final_boxes']} | Stage3-used cases={summary['stage3_used_cases']}",
-        f"Postprocess: filter Stage6 no/unknown, merge standard IoU > {args.merge_iou_threshold:.2f}, expand final boxes by {args.expand_frac:.2f}.",
+        f"Postprocess: filter Stage6 no/unknown, merge IoU > {args.merge_iou_threshold:.2f} or overlap/min-area >= {args.containment_overlap_threshold:.2f}, expand by {args.expand_frac:.2f}.",
+        f"Merge events={summary['post_filter_merge_events']} | IoU={summary['post_filter_iou_merge_events']} | containment={summary['post_filter_containment_merge_events']}",
     ]
     for line in lines:
         draw.text((70, y), line, font=body, fill="#111111")
@@ -353,7 +386,7 @@ def _draw_cover(summary: dict[str, Any], args: argparse.Namespace) -> Image.Imag
         "4. Stage 3 feedback redetection only for Stage 2b-positive cases.",
         "5. Stage 4 crop export: 30% padded WSI rereads near 1024 px max dimension.",
         "6. Stage 6 high-thinking crop tissue-vs-artifact yes/no filter.",
-        "7. Deterministic postprocess: no agentic bbox refinement; artifact filter, IoU merge, 10% margin.",
+        "7. Deterministic postprocess: no agentic bbox refinement; artifact filter, containment-aware merge, 10% margin.",
     ]
     for line in pipeline:
         y = _draw_wrapped(draw, (90, y), line, 140, small)
@@ -375,7 +408,8 @@ def _draw_case_page(record: dict[str, Any]) -> Image.Image:
         f"({record['stage2b_final_non_minor_detection_failure']}) | stage3_used={record['stage3_used']} "
         f"stage3_boxes={record['stage3_detection_count']} | stage4_candidates={record['stage4_candidate_count']} | "
         f"stage6 yes/no/unk={record['stage6_yes_count']}/{record['stage6_no_count']}/{record['stage6_unknown_count']} | "
-        f"final_boxes={len(record['final_boxes_yxyx_normalized'])} | merges={record['post_filter_merge_events']}"
+        f"final_boxes={len(record['final_boxes_yxyx_normalized'])} | merges={record['post_filter_merge_events']} "
+        f"(iou={record['post_filter_iou_merge_events']}, contain={record['post_filter_containment_merge_events']})"
     )
     y = _draw_wrapped(draw, (50, y), summary, 185, body)
     y += 18
@@ -432,6 +466,8 @@ def _write_outputs(case_records: list[dict[str, Any]], summary: dict[str, Any], 
                     "stage6_yes_count": record["stage6_yes_count"],
                     "stage6_no_count": record["stage6_no_count"],
                     "post_filter_merge_events": record["post_filter_merge_events"],
+                    "post_filter_iou_merge_events": record["post_filter_iou_merge_events"],
+                    "post_filter_containment_merge_events": record["post_filter_containment_merge_events"],
                     "final_overlay_path": record["final_overlay_path"],
                 }
             )
@@ -446,6 +482,8 @@ def _write_outputs(case_records: list[dict[str, Any]], summary: dict[str, Any], 
             "stage6_yes_count",
             "stage6_no_count",
             "post_filter_merge_events",
+            "post_filter_iou_merge_events",
+            "post_filter_containment_merge_events",
             "final_overlay_path",
         ],
     )
@@ -465,6 +503,8 @@ def _write_reproduction(pdf_path: Path, args: argparse.Namespace) -> None:
             str(args.output_root.resolve()),
             "--merge-iou-threshold",
             str(args.merge_iou_threshold),
+            "--containment-overlap-threshold",
+            str(args.containment_overlap_threshold),
             "--expand-frac",
             str(args.expand_frac),
         ]
@@ -481,8 +521,9 @@ Prompt version: {PROMPT_VERSION}
 Objective:
 Create the all-100 review packet after Stage 6 crop tissue-vs-artifact
 filtering. The final deterministic postprocess filters artifact/no/unknown crop
-detections, merges remaining boxes with standard IoU > {args.merge_iou_threshold:.2f}, and
-expands final boxes by {args.expand_frac:.2f}.
+detections, merges remaining boxes with standard IoU > {args.merge_iou_threshold:.2f}
+or overlap-over-smaller-box >= {args.containment_overlap_threshold:.2f}, and expands
+final boxes by {args.expand_frac:.2f}.
 
 Inputs:
 - Stage 1 cases: {args.stage1_cases.resolve()}
@@ -522,6 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage6-results", type=Path, default=DEFAULT_STAGE6_RESULTS)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--merge-iou-threshold", type=float, default=0.40)
+    parser.add_argument("--containment-overlap-threshold", type=float, default=0.80)
     parser.add_argument("--expand-frac", type=float, default=0.10)
     return parser
 
