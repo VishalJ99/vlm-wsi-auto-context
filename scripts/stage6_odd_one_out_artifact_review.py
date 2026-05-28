@@ -87,6 +87,12 @@ def _model_slug(model: str) -> str:
     return slug or "model"
 
 
+def _default_prompt_version(path: Path) -> str:
+    if "v2" in path.stem:
+        return "stage6_odd_one_out_artifact_review_v2_contains_consensus_2026-05-28"
+    return PROMPT_VERSION
+
+
 def _strip_json_fences(text: str) -> str:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -115,21 +121,24 @@ def _parse_response(text: str, expected_count: int) -> tuple[dict[str, Any] | No
     payload, route = _extract_json_object(text)
     if payload is None:
         return None, route, "no_json_object"
-    missing = [key for key in ("consensus", "patches", "flagged_artifacts") if key not in payload]
+    missing = [key for key in ("consensus", "flagged_artifacts") if key not in payload]
+    items_key = "crops" if "crops" in payload else "patches" if "patches" in payload else ""
+    if not items_key:
+        missing.append("crops_or_patches")
     if missing:
         return payload, route, f"missing_keys:{','.join(missing)}"
-    patches = payload.get("patches")
+    items = payload.get(items_key)
     flagged = payload.get("flagged_artifacts")
-    if not isinstance(patches, list) or not isinstance(flagged, list):
+    if not isinstance(items, list) or not isinstance(flagged, list):
         return payload, route, "wrong_types"
     ids = []
-    for patch in patches:
-        if isinstance(patch, dict) and "id" in patch:
+    for item in items:
+        if isinstance(item, dict) and "id" in item:
             try:
-                ids.append(int(patch["id"]))
+                ids.append(int(item["id"]))
             except Exception:
                 pass
-    if len(patches) != expected_count or sorted(ids) != list(range(1, expected_count + 1)):
+    if len(items) != expected_count or sorted(ids) != list(range(1, expected_count + 1)):
         return payload, route, "patch_id_mismatch"
     try:
         flagged_ids = sorted(int(item) for item in flagged)
@@ -241,7 +250,7 @@ def _build_case_inputs(rows: list[dict[str, str]], args: argparse.Namespace, pro
             "case_slug": case_slug,
             "patches": patches,
             "contact_sheet_path": str(contact_sheet_path),
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": args.prompt_version,
             "created_at": _timestamp(),
         }
         _draw_contact_sheet(case_record, contact_sheet_path)
@@ -282,7 +291,7 @@ def _run_one(
         "patch_ids": [patch["id"] for patch in case_record["patches"]],
         "crop_paths": [str(path) for path in image_paths],
         "contact_sheet_path": case_record["contact_sheet_path"],
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": args.prompt_version,
         "model": model,
         "reasoning_effort": args.reasoning_effort,
         "temperature": args.temperature,
@@ -375,10 +384,11 @@ def _patch_label_summary(parsed: dict[str, Any] | None) -> str:
     if not isinstance(parsed, dict):
         return ""
     rows = []
-    for patch in parsed.get("patches", []) or []:
-        if not isinstance(patch, dict):
+    items = parsed.get("crops") if isinstance(parsed.get("crops"), list) else parsed.get("patches", [])
+    for item in items or []:
+        if not isinstance(item, dict):
             continue
-        rows.append(f"{patch.get('id')}: {patch.get('label')} - {patch.get('reason')}")
+        rows.append(f"{item.get('id')}: {item.get('label')} - {item.get('reason')}")
     return "\n".join(rows)
 
 
@@ -483,7 +493,11 @@ def _write_pdf(
     pages = [_draw_cover(case_records, results, prompt, args)]
     for case in case_records:
         pages.append(_draw_case_page(case, by_case.get(int(case["case_index"]), [])))
-    pdf_path = output_root / "visuals/stage6_odd_one_out_artifact_review_flash_vs_pro.pdf"
+    if len(args.models) == 1:
+        pdf_name = f"stage6_odd_one_out_artifact_review_{_model_slug(args.models[0])}.pdf"
+    else:
+        pdf_name = "stage6_odd_one_out_artifact_review_flash_vs_pro.pdf"
+    pdf_path = output_root / "visuals" / pdf_name
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     pages[0].save(pdf_path, "PDF", resolution=150, save_all=True, append_images=pages[1:])
     return pdf_path
@@ -541,7 +555,7 @@ def _write_summaries(output_root: Path, results: list[dict[str, Any]], args: arg
         "created_at": _timestamp(),
         "ticket": TICKET,
         "git_commit": _repo_git_commit(),
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": args.prompt_version,
         "prompt_file": str(args.prompt.resolve()),
         "manifest": str(args.manifest.resolve()),
         "slides": args.slides,
@@ -605,12 +619,14 @@ PER-237 Stage 6 odd-one-out artifact review
 Created: {_timestamp()}
 Ticket: {TICKET}
 Git commit: {_repo_git_commit()}
-Prompt version: {PROMPT_VERSION}
+Prompt version: {args.prompt_version}
 Backend: OpenRouter-compatible chat completions
 Models: {', '.join(args.models)}
 Reasoning effort: {args.reasoning_effort}
 Reuse existing model outputs: {args.reuse_existing}
 Rerun incomplete calls only: {args.rerun_incomplete}
+Paid-call regeneration: remove `--reuse-existing` from the command below to
+make fresh API calls with the same inputs and settings.
 
 Objective:
 Explore whether the supplied consensus-signature / odd-one-out prompt can
@@ -643,6 +659,7 @@ Outputs:
 
 def run(args: argparse.Namespace) -> int:
     args.output_root.mkdir(parents=True, exist_ok=True)
+    args.prompt_version = args.prompt_version or _default_prompt_version(args.prompt)
     prompt = args.prompt.read_text().strip()
     (args.output_root / "prompt").mkdir(parents=True, exist_ok=True)
     (args.output_root / "prompt" / args.prompt.name).write_text(prompt + "\n")
@@ -670,6 +687,9 @@ def run(args: argparse.Namespace) -> int:
     results_path = args.output_root / "reviews/stage6_odd_one_out_artifact_review_results.jsonl"
     if args.reuse_existing and results_path.exists():
         results = [json.loads(line) for line in results_path.read_text().splitlines() if line.strip()]
+        for row in results:
+            row["prompt_version"] = args.prompt_version
+        _write_jsonl(results_path, results)
     else:
         base_url, api_key = _api_settings(args)
         existing_results: dict[tuple[int, str], dict[str, Any]] = {}
@@ -716,6 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slides", nargs="+", default=DEFAULT_SLIDES)
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--reasoning-effort", default="high", choices=["low", "medium", "high"])
+    parser.add_argument("--prompt-version", default=None)
     parser.add_argument("--api-base", default=None)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--api-key-stdin", action="store_true")
