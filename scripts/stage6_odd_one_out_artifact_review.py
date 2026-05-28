@@ -35,6 +35,7 @@ DEFAULT_OUTPUT_ROOT = (
     / "runs/stage1_detector_pilot_v1/stage1_detection_review_v1"
     / "stage6_odd_one_out_artifact_review_v1"
 )
+DEFAULT_MIN_CROPS = 2
 DEFAULT_SLIDES = [
     "he_patient_001_slide_001.svs",
     "evg_patient_011_slide_001.svs",
@@ -198,6 +199,29 @@ def _resolve_rows(manifest: Path, slides: list[str], all_manifest: bool) -> list
     if missing:
         raise SystemExit(f"Missing slides in manifest: {missing}")
     return [by_basename[slide] for slide in slides]
+
+
+def _filter_rows_by_crop_count(rows: list[dict[str, str]], min_crops: int) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    kept = []
+    skipped = []
+    for row in rows:
+        crop_count = len(_load_detected_regions(Path(row["bboxes_json_path"])))
+        if crop_count >= min_crops:
+            kept.append(row)
+            continue
+        skipped.append(
+            {
+                "index": int(row["index"]),
+                "pilot_row_id": row["pilot_row_id"],
+                "case_id": row["case_id"],
+                "stain": row["stain"],
+                "wsi_name": Path(row["wsi_path"]).name,
+                "crop_count": crop_count,
+                "min_crops": min_crops,
+                "skip_reason": "crop_count_below_min_crops",
+            }
+        )
+    return kept, skipped
 
 
 def _load_detected_regions(path: Path) -> list[dict[str, Any]]:
@@ -684,7 +708,10 @@ def _write_summaries(output_root: Path, results: list[dict[str, Any]], args: arg
         "prompt_file": str(args.prompt.resolve()),
         "manifest": str(args.manifest.resolve()),
         "all_manifest": args.all_manifest,
+        "min_crops": args.min_crops,
         "slides": args.slides,
+        "skipped_cases": args.skipped_cases,
+        "skipped_cases_jsonl": str((output_root / "tasks/skipped_cases_min_crops.jsonl").resolve()),
         "models": args.models,
         "reasoning_effort": args.reasoning_effort,
         "temperature": args.temperature,
@@ -720,6 +747,8 @@ def _write_reproduction(
         str(args.prompt.resolve()),
         "--output-root",
         str(args.output_root.resolve()),
+        "--min-crops",
+        str(args.min_crops),
         "--models",
         *args.models,
         "--reasoning-effort",
@@ -764,6 +793,8 @@ without forcing a most-different crop when all crops are consistent.
 Input construction:
 - Read cases from {args.manifest.resolve()}.
 - Select {'all manifest rows' if args.all_manifest else 'slides: ' + ', '.join(args.slides)}.
+- Skip cases with fewer than {args.min_crops} crop(s). Skipped cases are listed
+  in {(output_root / 'tasks/skipped_cases_min_crops.jsonl').resolve()}.
 - Read each existing Stage 1 thumbnail and bboxes.json.
 - Crop each detected bbox using bbox_thumbnail coordinates.
 - Send only the raw thumbnail crop images to the VLM, with no boxes drawn.
@@ -778,6 +809,7 @@ Command:
 
 Outputs:
 - Input manifest: {(output_root / 'inputs/input_manifest.jsonl').resolve()}
+- Skipped cases: {(output_root / 'tasks/skipped_cases_min_crops.jsonl').resolve()}
 - Results JSONL: {(output_root / 'reviews/stage6_odd_one_out_artifact_review_results.jsonl').resolve()}
 - Summary JSON: {summary_path.resolve()}
 - Summary CSV: {(output_root / 'summary/stage6_odd_one_out_artifact_review_summary.csv').resolve()}
@@ -789,6 +821,8 @@ Outputs:
 def run(args: argparse.Namespace) -> int:
     if args.all_manifest and args.slides:
         raise SystemExit("--all-manifest cannot be combined with --slides")
+    if args.min_crops < 1:
+        raise SystemExit("--min-crops must be >= 1")
     if args.slides is None:
         args.slides = [] if args.all_manifest else DEFAULT_SLIDES
     args.output_root.mkdir(parents=True, exist_ok=True)
@@ -797,6 +831,9 @@ def run(args: argparse.Namespace) -> int:
     (args.output_root / "prompt").mkdir(parents=True, exist_ok=True)
     (args.output_root / "prompt" / args.prompt.name).write_text(prompt + "\n")
     rows = _resolve_rows(args.manifest, args.slides, args.all_manifest)
+    rows, skipped_cases = _filter_rows_by_crop_count(rows, args.min_crops)
+    args.skipped_cases = skipped_cases
+    _write_jsonl(args.output_root / "tasks/skipped_cases_min_crops.jsonl", skipped_cases)
     case_records = _build_case_inputs(rows, args, prompt)
     _write_jsonl(
         args.output_root / "tasks/stage6_odd_one_out_artifact_review_tasks.jsonl",
@@ -814,12 +851,28 @@ def run(args: argparse.Namespace) -> int:
         ],
     )
     if args.dry_run:
-        print(json.dumps({"dry_run": True, "cases": len(case_records), "output_root": str(args.output_root)}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "cases": len(case_records),
+                    "skipped_cases": len(skipped_cases),
+                    "min_crops": args.min_crops,
+                    "output_root": str(args.output_root),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     results_path = args.output_root / "reviews/stage6_odd_one_out_artifact_review_results.jsonl"
+    selected_case_indices = {int(case["case_index"]) for case in case_records}
     if args.reuse_existing and results_path.exists():
-        results = [json.loads(line) for line in results_path.read_text().splitlines() if line.strip()]
+        results = [
+            row
+            for row in (json.loads(line) for line in results_path.read_text().splitlines() if line.strip())
+            if int(row["case_index"]) in selected_case_indices and row.get("model") in args.models
+        ]
         for row in results:
             row["prompt_version"] = args.prompt_version
         _write_jsonl(results_path, results)
@@ -831,6 +884,8 @@ def run(args: argparse.Namespace) -> int:
                 if not line.strip():
                     continue
                 row = json.loads(line)
+                if int(row["case_index"]) not in selected_case_indices or row.get("model") not in args.models:
+                    continue
                 key = (int(row["case_index"]), str(row["model"]))
                 if row.get("parse_status") == "ok" and not row.get("error"):
                     existing_results[key] = row
@@ -868,6 +923,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--slides", nargs="+", default=None)
     parser.add_argument("--all-manifest", action="store_true")
+    parser.add_argument("--min-crops", type=int, default=DEFAULT_MIN_CROPS)
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--prompt-version", default=None)
