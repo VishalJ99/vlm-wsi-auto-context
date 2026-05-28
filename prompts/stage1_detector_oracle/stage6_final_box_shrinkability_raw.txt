@@ -1,1 +1,1 @@
-could the box be made smaller without clipping the extremeties of the tissue it is focused on?
+could any sides of the box be made smaller without clipping theextremeties of the primary tissue it is focused on?

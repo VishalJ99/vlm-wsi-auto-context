@@ -31,7 +31,7 @@ DEFAULT_OUTPUT_ROOT = (
 )
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_INDICES = [99]
-PROMPT_VERSION = "stage6_final_box_shrinkability_raw_2026-05-27"
+PROMPT_VERSION = "stage6_final_box_shrinkability_any_sides_primary_2026-05-28"
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
