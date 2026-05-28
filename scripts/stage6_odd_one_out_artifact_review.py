@@ -101,19 +101,56 @@ def _strip_json_fences(text: str) -> str:
     return cleaned.strip()
 
 
+def _json_object_candidates(text: str) -> list[str]:
+    candidates = []
+    starts = [idx for idx, char in enumerate(text) if char == "{"]
+    for start in starts:
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            char = text[idx]
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(text[start : idx + 1])
+                    break
+    return candidates
+
+
 def _extract_json_object(text: str) -> tuple[dict[str, Any] | None, str]:
     cleaned = _strip_json_fences(text)
     candidates = [cleaned]
     match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
     if match:
         candidates.append(match.group(0))
+    candidates.extend(reversed(_json_object_candidates(cleaned)))
+    first_payload: dict[str, Any] | None = None
     for candidate in candidates:
         try:
             payload = json.loads(candidate)
         except Exception:
             continue
         if isinstance(payload, dict):
-            return payload, "json"
+            if first_payload is None:
+                first_payload = payload
+            if any(key in payload for key in ("consensus", "flagged_artifacts", "crops", "patches")):
+                return payload, "json"
+    if first_payload is not None:
+        return first_payload, "json"
     return None, "unparsed"
 
 
@@ -149,8 +186,10 @@ def _parse_response(text: str, expected_count: int) -> tuple[dict[str, Any] | No
     return payload, route, "ok"
 
 
-def _resolve_rows(manifest: Path, slides: list[str]) -> list[dict[str, str]]:
+def _resolve_rows(manifest: Path, slides: list[str], all_manifest: bool) -> list[dict[str, str]]:
     rows = _read_csv(manifest)
+    if all_manifest:
+        return rows
     by_basename: dict[str, dict[str, str]] = {}
     for row in rows:
         basename = Path(row["wsi_path"]).name
@@ -263,7 +302,7 @@ def _build_case_inputs(rows: list[dict[str, str]], args: argparse.Namespace, pro
 def _task_prompt(prompt: str, patch_count: int) -> str:
     return (
         prompt.strip()
-        + "\n\nThe attached crop images are ordered by patch id. "
+        + "\n\nThe attached crop images are ordered by crop id. "
         + f"Use id 1 for the first attached image through id {patch_count} for the last attached image."
     )
 
@@ -361,13 +400,31 @@ def _draw_wrapped(
     return y
 
 
-def _draw_patch_grid(page: Image.Image, patches: list[dict[str, Any]], x0: int, y0: int) -> int:
+def _flagged_ids(result_rows: list[dict[str, Any]]) -> set[int]:
+    flagged: set[int] = set()
+    for row in result_rows:
+        for item in row.get("flagged_artifacts", []):
+            try:
+                flagged.add(int(item))
+            except Exception:
+                continue
+    return flagged
+
+
+def _draw_patch_grid(
+    page: Image.Image,
+    patches: list[dict[str, Any]],
+    x0: int,
+    y0: int,
+    flagged_ids: set[int] | None = None,
+) -> int:
     draw = ImageDraw.Draw(page)
     small = _font(17)
     panel_w, panel_h = 300, 220
     gap_x, gap_y = 24, 48
     cols = min(4, max(1, len(patches)))
     bottom = y0
+    flagged_ids = flagged_ids or set()
     for idx, patch in enumerate(patches):
         col = idx % cols
         row = idx // cols
@@ -375,7 +432,21 @@ def _draw_patch_grid(page: Image.Image, patches: list[dict[str, Any]], x0: int, 
         y = y0 + row * (panel_h + gap_y)
         image = _thumb(Path(patch["crop_path"]), (panel_w, panel_h))
         page.paste(image, (x, y))
-        draw.text((x, y + image.height + 5), f"id {patch['id']} | {patch['crop_size'][0]}x{patch['crop_size'][1]}", font=small, fill="#111111")
+        is_flagged = int(patch["id"]) in flagged_ids
+        if is_flagged:
+            draw.rectangle(
+                (x - 6, y - 6, x + image.width + 6, y + image.height + 6),
+                outline="#d7191c",
+                width=10,
+            )
+        label_fill = "#b00020" if is_flagged else "#111111"
+        suffix = " | FLAGGED" if is_flagged else ""
+        draw.text(
+            (x, y + image.height + 5),
+            f"id {patch['id']} | {patch['crop_size'][0]}x{patch['crop_size'][1]}{suffix}",
+            font=small,
+            fill=label_fill,
+        )
         bottom = max(bottom, y + panel_h + gap_y)
     return bottom
 
@@ -405,7 +476,7 @@ def _draw_case_page(case_record: dict[str, Any], result_rows: list[dict[str, Any
     y = _draw_wrapped(
         draw,
         (55, y),
-        f"{case_record['case_id']} | {case_record['anon_path_id']} | patches={case_record['bbox_count']}",
+        f"{case_record['case_id']} | {case_record['anon_path_id']} | crops={case_record['bbox_count']}",
         170,
         body,
         "#111111",
@@ -414,7 +485,19 @@ def _draw_case_page(case_record: dict[str, Any], result_rows: list[dict[str, Any
     y += 18
     draw.text((55, y), "Raw thumbnail crops sent to VLM (no boxes drawn)", font=header, fill="black")
     y += 36
-    y = _draw_patch_grid(page, case_record["patches"], 55, y) + 22
+    flagged_ids = _flagged_ids(result_rows)
+    if flagged_ids:
+        y = _draw_wrapped(
+            draw,
+            (55, y),
+            f"Red outline = crop ids in flagged_artifacts: {sorted(flagged_ids)}",
+            140,
+            small,
+            "#b00020",
+            20,
+        )
+        y += 8
+    y = _draw_patch_grid(page, case_record["patches"], 55, y, flagged_ids) + 22
 
     col_w = 1190
     x_positions = [55, 1320]
@@ -459,16 +542,58 @@ def _draw_cover(
     y += 38
     draw.text((70, y), "Inputs are exact Stage 1 thumbnail bbox crops, without drawn boxes.", font=body, fill="#111111")
     y += 50
-    draw.text((70, y), "Flag Counts", font=header, fill="black")
+    draw.text((70, y), "Run Summary", font=header, fill="black")
     y += 38
+    model_counts: dict[str, dict[str, int]] = {}
     for row in results:
+        bucket = model_counts.setdefault(
+            row["model"],
+            {"calls": 0, "flagged_cases": 0, "flagged_crops": 0, "parse_not_ok": 0},
+        )
+        bucket["calls"] += 1
+        bucket["flagged_cases"] += int(bool(row.get("flagged_artifacts")))
+        bucket["flagged_crops"] += len(row.get("flagged_artifacts", []))
+        bucket["parse_not_ok"] += int(row.get("parse_status") != "ok")
+    for model, counts in model_counts.items():
+        line = (
+            f"{model.replace('google/', '')}: calls={counts['calls']} | "
+            f"flagged_cases={counts['flagged_cases']} | flagged_crops={counts['flagged_crops']} | "
+            f"parse_not_ok={counts['parse_not_ok']}"
+        )
+        y = _draw_wrapped(draw, (95, y), line, 160, small, "#111111", 22)
+    y += 24
+    draw.text((70, y), "Flagged Or Non-OK Rows", font=header, fill="black")
+    y += 38
+    rows_to_show = [
+        row
+        for row in results
+        if row.get("flagged_artifacts") or row.get("parse_status") != "ok" or row.get("error")
+    ]
+    if not rows_to_show:
+        y = _draw_wrapped(draw, (95, y), "No rows were flagged and all parses were ok.", 160, small, "#111111", 22)
+    cover_row_limit = 45
+    for row in rows_to_show[:cover_row_limit]:
         line = f"{row['case_index']:03d} {row['stain']} {row['wsi_name']} | {row['model'].replace('google/', '')}: flagged={row.get('flagged_artifacts')} parse={row.get('parse_status')}"
         y = _draw_wrapped(draw, (95, y), line, 160, small, "#111111", 22)
+    if len(rows_to_show) > cover_row_limit:
+        y = _draw_wrapped(draw, (95, y), f"... {len(rows_to_show) - cover_row_limit} more rows in the summary CSV.", 160, small, "#111111", 22)
     y += 30
     draw.text((70, y), "Cases", font=header, fill="black")
     y += 38
-    for case in case_records:
-        line = f"{case['case_index']:03d} | {case['stain']} | {case['case_id']} | {case['anon_path_id']} | {case['wsi_name']} | patches={case['bbox_count']}"
+    if len(case_records) <= 20:
+        for case in case_records:
+            line = f"{case['case_index']:03d} | {case['stain']} | {case['case_id']} | {case['anon_path_id']} | {case['wsi_name']} | crops={case['bbox_count']}"
+            y = _draw_wrapped(draw, (95, y), line, 160, small, "#111111", 22)
+    else:
+        stain_counts: dict[str, int] = {}
+        crop_counts = []
+        for case in case_records:
+            stain_counts[case["stain"]] = stain_counts.get(case["stain"], 0) + 1
+            crop_counts.append(int(case["bbox_count"]))
+        line = (
+            f"{len(case_records)} cases | stains={dict(sorted(stain_counts.items()))} | "
+            f"crop_count_min={min(crop_counts)} max={max(crop_counts)}"
+        )
         y = _draw_wrapped(draw, (95, y), line, 160, small, "#111111", 22)
     y += 30
     draw.text((70, y), "Prompt", font=header, fill="black")
@@ -544,10 +669,10 @@ def _write_summaries(output_root: Path, results: list[dict[str, Any]], args: arg
     )
     model_counts: dict[str, dict[str, Any]] = {}
     for row in results:
-        bucket = model_counts.setdefault(row["model"], {"cases": 0, "flagged_cases": 0, "flagged_patches": 0, "parse_status_counts": {}})
+        bucket = model_counts.setdefault(row["model"], {"cases": 0, "flagged_cases": 0, "flagged_crops": 0, "parse_status_counts": {}})
         bucket["cases"] += 1
         bucket["flagged_cases"] += int(bool(row.get("flagged_artifacts")))
-        bucket["flagged_patches"] += len(row.get("flagged_artifacts", []))
+        bucket["flagged_crops"] += len(row.get("flagged_artifacts", []))
         status_counts = bucket["parse_status_counts"]
         status = str(row.get("parse_status", ""))
         status_counts[status] = status_counts.get(status, 0) + 1
@@ -558,6 +683,7 @@ def _write_summaries(output_root: Path, results: list[dict[str, Any]], args: arg
         "prompt_version": args.prompt_version,
         "prompt_file": str(args.prompt.resolve()),
         "manifest": str(args.manifest.resolve()),
+        "all_manifest": args.all_manifest,
         "slides": args.slides,
         "models": args.models,
         "reasoning_effort": args.reasoning_effort,
@@ -598,8 +724,6 @@ def _write_reproduction(
         *args.models,
         "--reasoning-effort",
         args.reasoning_effort,
-        "--slides",
-        *args.slides,
         "--max-concurrent",
         str(args.max_concurrent),
         "--max-tokens",
@@ -607,6 +731,10 @@ def _write_reproduction(
         "--temperature",
         str(args.temperature),
     ]
+    if args.all_manifest:
+        command_parts.append("--all-manifest")
+    else:
+        command_parts.extend(["--slides", *args.slides])
     if args.reuse_existing:
         command_parts.append("--reuse-existing")
     if args.rerun_incomplete:
@@ -635,11 +763,12 @@ without forcing a most-different crop when all crops are consistent.
 
 Input construction:
 - Read cases from {args.manifest.resolve()}.
-- Select slides: {', '.join(args.slides)}.
+- Select {'all manifest rows' if args.all_manifest else 'slides: ' + ', '.join(args.slides)}.
 - Read each existing Stage 1 thumbnail and bboxes.json.
 - Crop each detected bbox using bbox_thumbnail coordinates.
 - Send only the raw thumbnail crop images to the VLM, with no boxes drawn.
-- Patch ids correspond to image attachment order, starting at 1.
+- Crop ids correspond to image attachment order, starting at 1.
+- PDF case pages outline any crop ids in flagged_artifacts in red.
 
 Prompt:
 {prompt}
@@ -658,12 +787,16 @@ Outputs:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.all_manifest and args.slides:
+        raise SystemExit("--all-manifest cannot be combined with --slides")
+    if args.slides is None:
+        args.slides = [] if args.all_manifest else DEFAULT_SLIDES
     args.output_root.mkdir(parents=True, exist_ok=True)
     args.prompt_version = args.prompt_version or _default_prompt_version(args.prompt)
     prompt = args.prompt.read_text().strip()
     (args.output_root / "prompt").mkdir(parents=True, exist_ok=True)
     (args.output_root / "prompt" / args.prompt.name).write_text(prompt + "\n")
-    rows = _resolve_rows(args.manifest, args.slides)
+    rows = _resolve_rows(args.manifest, args.slides, args.all_manifest)
     case_records = _build_case_inputs(rows, args, prompt)
     _write_jsonl(
         args.output_root / "tasks/stage6_odd_one_out_artifact_review_tasks.jsonl",
@@ -673,7 +806,7 @@ def run(args: argparse.Namespace) -> int:
                 "case_index": case["case_index"],
                 "wsi_name": case["wsi_name"],
                 "stain": case["stain"],
-                "patch_count": case["bbox_count"],
+                "crop_count": case["bbox_count"],
                 "models": args.models,
                 "reasoning_effort": args.reasoning_effort,
             }
@@ -733,7 +866,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--prompt", type=Path, default=DEFAULT_PROMPT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--slides", nargs="+", default=DEFAULT_SLIDES)
+    parser.add_argument("--slides", nargs="+", default=None)
+    parser.add_argument("--all-manifest", action="store_true")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--prompt-version", default=None)
