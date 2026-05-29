@@ -38,6 +38,58 @@ python run_auto_context.py \
   --stage3-method kmeans
 ```
 
+### `scripts/run_detector_pipeline.py`
+PER-207 arbitrary-WSI detector-oracle pipeline for bbox discovery and review.
+It accepts exactly one input source:
+
+- positional WSI path, WSI directory, or `.txt` worklist,
+- `--wsi /path/to/slide.svs`,
+- `--wsi-dir /path/to/wsis`,
+- `--wsi-list /path/to/wsis.txt`.
+
+Default execution is breadth-first: finish one stage across all WSIs before
+moving to the next stage, with `--max-concurrent` controlling concurrent VLM
+calls. `--batch-mode depth-first` processes one WSI through the full pipeline at
+a time and parallelizes crop-level calls within that WSI.
+
+Current integrated stage order:
+
+1. Stage 1 thumbnail detection with the high-recall tissue-candidate prompt.
+2. Stage 2a free-text missed/overcoverage review on the source thumbnail plus
+   Stage 1 raw overlay.
+3. Stage 2b text router over the Stage 2a review.
+4. Optional Stage 3 feedback redetection on the original thumbnail plus raw
+   overlay when Stage 2b triggers, or when `--force-stage3-redetect` is set.
+5. Stage 4 deterministic merge/padding and optional high-resolution crop
+   redetection.
+6. Stage 5 classification-crop construction.
+7. Stage 6 tissue/artifact classification.
+8. Stage 7 comparative thumbnail-crop artifact filtering.
+
+Pilot-100 run matching the latest reviewed packet:
+
+```bash
+eval "$(rg '^export (OPENROUTER_API_KEY|OPENAI_API_KEY)=' /homes/vj724/.zshrc)"
+python scripts/run_detector_pipeline.py test-pipeline/pilot_100_wsis.txt \
+  --output-dir test-pipeline-integrated-skip-stage4 \
+  --save-all-stage-artifacts \
+  --batch-mode breadth-first \
+  --max-concurrent 16 \
+  --skip-repro \
+  --skip-crop-redetect
+```
+
+`--skip-crop-redetect` skips the high-resolution Stage 4 redetection VLM calls.
+The deterministic Stage 4 merge/normalization still runs because Stage 5 needs
+normalized boxes. Single-WSI runs write `final_detected_bboxes.png`,
+`detections.json`, and `reproduction.txt` directly under `--output-dir`.
+Multi-WSI runs create one subdirectory per WSI filename stem, plus root-level
+`summary.json`, `all_detections.json`, prompt copies, and aggregate JSONL/CSV
+tables when `--save-all-stage-artifacts` is set.
+
+The latest pilot-100 final-detections PDF is:
+`/data2/vj724/vlm-wsi-auto-context/test-pipeline-integrated-skip-stage4/visuals/final_detections_pilot100.pdf`.
+
 ## Reviewer
 
 ### `run_vlm_reviewer_batch.py`
