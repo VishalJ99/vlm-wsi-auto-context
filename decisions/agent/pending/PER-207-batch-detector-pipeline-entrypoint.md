@@ -43,6 +43,27 @@ pilot Stage 3 artifacts. If the arbitrary-WSI entrypoint should literally run
 the Stage 2/3 reviewer-feedback redetection loop inline, add that as an explicit
 source mode rather than hiding it inside the postprocessing step.
 
+## 2026-05-29 Update
+
+The boundary above has been folded into the arbitrary-WSI entrypoint. The
+default flow is now:
+
+1. Stage 1 thumbnail detection.
+2. Stage 2a free-text detection review on the thumbnail and Stage 1 raw overlay.
+3. Stage 2b two-pass text router deciding whether the review describes a
+   non-minor detection failure.
+4. Optional Stage 3 feedback redetection on the original thumbnail and previous
+   overlay when Stage 2b triggers it, or when `--force-stage3-redetect` is set.
+5. Stage 4 deterministic merge/padding and optional high-resolution crop
+   redetection.
+6. Stage 5 crop construction, Stage 6 tissue/artifact classification, and Stage
+   7 comparative thumbnail filtering.
+
+If Stage 3 does not run, Stage 4 starts from the raw Stage 1 boxes. If Stage 3
+runs successfully, Stage 4 starts from the feedback-redetected boxes. The old
+post-Stage-3 deterministic merge step is therefore now the Stage 4 input
+normalization step in `scripts/run_detector_pipeline.py`.
+
 ## Consequences
 
 - Single-case output is review-friendly: `final_detected_bboxes.png`,

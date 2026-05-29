@@ -2,10 +2,10 @@
 """Run the detector-oracle bbox pipeline on arbitrary WSI inputs.
 
 This entrypoint accepts a single WSI path, a directory of WSIs, or a text file
-with one WSI path per line. It runs the updated post-Stage-3 detector flow:
-thumbnail Stage 1 detection, deterministic bbox postprocessing, optional
-high-resolution crop redetection with the same Stage 1 prompt, crop
-classification, comparative thumbnail-crop filtering, and final bbox export.
+with one WSI path per line. It runs the detector-oracle flow: thumbnail Stage 1
+detection, the two-step Stage 2 review/router, optional Stage 3 feedback
+redetection, optional high-resolution crop redetection, crop classification,
+comparative thumbnail-crop filtering, and final bbox export.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from stage1_detection_review_pilot import (
     _safe_slug,
     _timestamp,
 )
+from stage1_review_trigger_router import _chat_text, _parse_router_response
 from stage4_crop_prompt_packet import (
     _normalised_yxyx_to_level0,
     _pad_level0_bbox,
@@ -61,6 +62,18 @@ from utils.wsi_backend import close_wsi, get_pyramid_info, load_wsi
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STAGE1_DETECTOR = REPO_ROOT / "detect_foreground_regions_from_wsi_thumbnail.py"
 DEFAULT_STAGE1_PROMPT = REPO_ROOT / "prompts/stage1_high_recall_potential_tissue_candidates.txt"
+DEFAULT_STAGE2A_PROMPT = (
+    REPO_ROOT / "prompts/stage1_detector_oracle/stage2a_missed_or_overcoverage_review.txt"
+)
+DEFAULT_STAGE2B_FIRST_PROMPT = (
+    REPO_ROOT / "prompts/stage1_detector_oracle/stage2b_nonminor_detection_failure_json.txt"
+)
+DEFAULT_STAGE2B_SECOND_PROMPT = (
+    REPO_ROOT / "prompts/stage1_detector_oracle/stage2b_nonminor_detection_failure_adjudicate_json.txt"
+)
+DEFAULT_STAGE3_WRAPPER_PROMPT = (
+    REPO_ROOT / "prompts/stage1_detector_oracle/stage3_refinement_minimal_wrapper.txt"
+)
 DEFAULT_CLASSIFICATION_PROMPT = (
     REPO_ROOT / "prompts/stage1_detector_oracle/stage6_crop_true_false_positive.txt"
 )
@@ -96,18 +109,39 @@ def _existing_file_path(value: Any) -> Path | None:
 
 
 def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
+    stage2_output = (
+        "Skipped by --skip-stage2-review; Stage 3 is not triggered and Stage 4 "
+        "uses Stage 1 raw boxes."
+        if args.skip_stage2_review
+        else (
+            "Stage 2a free-text review plus Stage 2b two-pass text router. "
+            "The final Stage 2b non-minor-failure boolean controls whether "
+            "Stage 3 feedback redetection runs unless --force-stage3-redetect "
+            "is set."
+        )
+    )
     stage3_output = (
-        "Boxes merged with IoU/overlap-over-smaller logic. The unpadded merged "
-        "boxes are forwarded directly to Stage 5; 15% expanded boxes are still "
-        "recorded for comparison, but no Stage 4 crops are read."
+        "Skipped because --skip-stage2-review disables the review trigger."
+        if args.skip_stage2_review
+        else (
+            "Runs only for Stage 2b-positive cases. Positive cases get new "
+            "thumbnail detections from the Stage 3 wrapper prompt; negative "
+            "cases keep the Stage 1 raw boxes unless --force-stage3-redetect "
+            "is set."
+        )
+    )
+    stage4_output = (
+        "Active boxes are merged with IoU/overlap-over-smaller logic. The "
+        "unpadded merged boxes are forwarded directly to Stage 5; 15% expanded "
+        "boxes are still recorded for comparison, but no Stage 4 crops are read."
         if args.skip_crop_redetect
         else (
-            "Boxes merged with IoU/overlap-over-smaller logic, then padded "
+            "Active boxes are merged with IoU/overlap-over-smaller logic, then padded "
             f"by {args.post_stage3_padding_frac:.3f}; these define the high-res WSI crops."
         )
     )
     crop_redetect_output = (
-        "Skipped by --skip-crop-redetect; Stage 5 reads the Stage 3 merged "
+        "Skipped by --skip-crop-redetect; Stage 5 reads the Stage 4 merged "
         "boxes directly."
         if args.skip_crop_redetect
         else (
@@ -116,7 +150,7 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
         )
     )
     stage5_input = (
-        "No VLM input. Uses Stage 3 merged boxes directly because crop redetection is skipped."
+        "No VLM input. Uses Stage 4 merged boxes directly because crop redetection is skipped."
         if args.skip_crop_redetect
         else "No VLM input. Uses mapped high-res crop-redetection boxes."
     )
@@ -135,21 +169,40 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
             ),
         },
         {
-            "stage": "stage3_source_postprocess",
-            "prompt": None,
-            "input_image": "No VLM input. Uses current source boxes from Stage 1 raw rotation output.",
+            "stage": "stage2_detection_review_router",
+            "prompt": (
+                f"2a: {args.stage2a_prompt.resolve()}; "
+                f"2b first: {args.stage2b_first_prompt.resolve()}; "
+                f"2b second: {args.stage2b_second_prompt.resolve()}"
+            ),
+            "input_image": (
+                "Stage 2a sees the source thumbnail and Stage 1 raw-overlay image. "
+                "Stage 2b is text-only over the Stage 2a review."
+            ),
+            "output": stage2_output,
+        },
+        {
+            "stage": "stage3_feedback_redetection",
+            "prompt": (
+                f"wrapper: {args.stage3_wrapper_prompt.resolve()}; "
+                f"task: {args.stage1_prompt.resolve()}"
+            ),
+            "input_image": (
+                "Original whole-slide thumbnail plus previous Stage 1 raw-overlay image, "
+                "only for Stage 2b-positive cases or forced Stage 3 runs."
+            ),
             "output": stage3_output,
         },
         {
             "stage": "stage4_high_res_crop_redetect",
             "prompt": str(args.stage1_prompt.resolve()),
             "input_image": (
-                "High-resolution WSI crops read from the postprocessed boxes, "
+                "High-resolution WSI crops read from Stage 4 postprocessed active boxes, "
                 f"with target max_dim={args.crop_max_dim}."
                 if not args.skip_crop_redetect
                 else "Skipped by --skip-crop-redetect."
             ),
-            "output": crop_redetect_output,
+            "output": stage4_output + " " + crop_redetect_output,
         },
         {
             "stage": "stage5_post_redetect_merge_and_crop",
@@ -440,12 +493,495 @@ def _run_stage1_case(
             "stage1_bboxes_json_path": str(bboxes_path) if bboxes_path.exists() else "",
             "stage1_metadata_path": str(metadata_path) if metadata_path.exists() else "",
             "stage1_command_log_path": str(log_path),
-            "source_stage": f"stage1_raw_rot{int(args.stage1_source_rotation)}",
+            "stage1_source_stage": f"stage1_raw_rot{int(args.stage1_source_rotation)}",
             "source_detector_overlay_path": str(raw_overlay_path) if raw_overlay_path.exists() else "",
+            "stage1_source_boxes_yxyx_normalized": source_boxes,
+            "stage1_source_box_count": len(source_boxes),
+            "stage1_raw_parse_status": raw_note or ("ok" if source_boxes else "empty"),
             "source_boxes_yxyx_normalized": source_boxes,
             "source_box_count": len(source_boxes),
+            "active_source_stage": f"stage1_raw_rot{int(args.stage1_source_rotation)}",
+            "active_detector_overlay_path": str(raw_overlay_path) if raw_overlay_path.exists() else "",
+            "active_boxes_yxyx_normalized": source_boxes,
+            "active_box_count": len(source_boxes),
             "wsi_size": wsi_size,
             "wsi_reader": metadata.get("wsi_reader", args.wsi_reader),
+        }
+    )
+    return case
+
+
+def _boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "yes", "1"}
+
+
+def _stage2_first_prompt(prompt_template: str, review_record: dict[str, Any]) -> str:
+    return (
+        prompt_template.strip()
+        + "\n\nCase:\n"
+        + str(review_record.get("case_display") or "")
+        + "\n\nReviewer metadata:\n"
+        + json.dumps(
+            {
+                "task_id": review_record.get("task_id", ""),
+                "reviewer_model": review_record.get("model", ""),
+                "reviewer_reasoning_effort": review_record.get("reasoning_effort", ""),
+                "reviewed_bbox_count": review_record.get("reviewed_bbox_count", ""),
+                "overlay_kind": review_record.get("overlay_kind", ""),
+                "raw_response_status": review_record.get("raw_response_status", ""),
+            },
+            sort_keys=True,
+        )
+        + "\n\nReview text:\n"
+        + str(review_record.get("raw_response") or "").strip()
+    )
+
+
+def _stage2_second_prompt(
+    prompt_template: str,
+    review_record: dict[str, Any],
+    first_raw: str,
+    first_parsed: dict[str, Any],
+) -> str:
+    return (
+        prompt_template.strip()
+        + "\n\nCase:\n"
+        + str(review_record.get("case_display") or "")
+        + "\n\nOriginal reviewer output:\n"
+        + str(review_record.get("raw_response") or "").strip()
+        + "\n\nInitial answer:\n"
+        + json.dumps(
+            {
+                "raw_response": first_raw,
+                "parsed_response": first_parsed,
+                "answer": first_parsed.get("answer", ""),
+                "justification": first_parsed.get("justification", first_parsed.get("rationale", "")),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _run_stage2a_case(
+    case: dict[str, Any],
+    prompt: str,
+    args: argparse.Namespace,
+    base_url: str,
+    api_key: str,
+) -> dict[str, Any]:
+    case = {**case, "errors": list(case.get("errors") or [])}
+    artifacts_dir = Path(case["artifacts_dir"])
+    stage_dir = artifacts_dir / "stage2_detection_review_router"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    result_path = stage_dir / "stage2a_detection_review.json"
+    review_overlay_path = stage_dir / "stage2a_stage1_raw_overlay.png"
+    thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
+
+    boxes = [
+        [float(value) for value in box]
+        for box in case.get("stage1_source_boxes_yxyx_normalized", case.get("source_boxes_yxyx_normalized", []))
+    ]
+    if thumbnail_path is not None:
+        _draw_boxes_overlay(
+            thumbnail_path,
+            review_overlay_path,
+            boxes,
+            f"Stage 2a review input: {len(boxes)} Stage 1 raw box(es)",
+        )
+
+    if args.skip_stage2_review:
+        record = {
+            "task_id": f"{case['case_slug']}_stage2a",
+            "case_index": int(case["case_index"]),
+            "case_id": case["case_id"],
+            "case_slug": case["case_slug"],
+            "case_display": case["case_display"],
+            "stage": "stage2a_detection_review",
+            "skipped": True,
+            "skip_reason": "skip_stage2_review",
+            "raw_response": "",
+            "parsed_response": {"raw_text": ""},
+            "error": "",
+            "review_overlay_path": str(review_overlay_path) if review_overlay_path.exists() else "",
+            "reviewed_bbox_count": len(boxes),
+            "created_at": _timestamp(),
+        }
+        _write_json(result_path, record)
+    elif args.reuse_existing and result_path.exists():
+        record = _read_json(result_path)
+    else:
+        record = {
+            "task_id": f"{case['case_slug']}_stage2a",
+            "case_index": int(case["case_index"]),
+            "case_id": case["case_id"],
+            "case_slug": case["case_slug"],
+            "case_display": case["case_display"],
+            "stage": "stage2a_detection_review",
+            "prompt_file": str(args.stage2a_prompt),
+            "prompt_version": f"{args.stage2a_prompt.stem}_integrated",
+            "model": args.model,
+            "reasoning_effort": args.stage2a_reasoning_effort,
+            "thumbnail_path": case.get("thumbnail_path", ""),
+            "review_overlay_path": str(review_overlay_path) if review_overlay_path.exists() else "",
+            "overlay_kind": "stage1_raw_overlay",
+            "reviewed_bbox_count": len(boxes),
+            "raw_response_status": case.get("stage1_raw_parse_status", ""),
+            "raw_response": "",
+            "parsed_response": {},
+            "usage": {},
+            "response_model": "",
+            "error": "",
+            "created_at": _timestamp(),
+        }
+        try:
+            if thumbnail_path is None or not review_overlay_path.exists():
+                raise FileNotFoundError("Missing Stage 2a thumbnail or review overlay input.")
+            raw, usage, response_model = _chat_with_images(
+                model=args.model,
+                prompt_text=prompt,
+                image_paths=[thumbnail_path, review_overlay_path],
+                temperature=args.temperature,
+                max_tokens=args.stage2a_max_tokens,
+                base_url=base_url,
+                api_key=api_key,
+                reasoning_effort=args.stage2a_reasoning_effort,
+            )
+            record.update(
+                {
+                    "raw_response": raw,
+                    "parsed_response": {"raw_text": raw},
+                    "usage": usage,
+                    "response_model": response_model,
+                }
+            )
+        except Exception as exc:
+            record["error"] = repr(exc)
+        _write_json(result_path, record)
+
+    if record.get("error"):
+        case["errors"].append(
+            {
+                "stage": "stage2a_detection_review",
+                "message": record["error"],
+                "result_path": str(result_path),
+            }
+        )
+    case.update(
+        {
+            "stage2_dir": str(stage_dir),
+            "stage2a_review_result_path": str(result_path),
+            "stage2a_review_overlay_path": record.get("review_overlay_path", ""),
+            "stage2a_review_text": record.get("raw_response", ""),
+            "stage2a_review_error": record.get("error", ""),
+            "stage2a_review_skipped": bool(record.get("skipped", False)),
+        }
+    )
+    return case
+
+
+def _run_stage2b_case(
+    case: dict[str, Any],
+    first_prompt: str,
+    second_prompt: str,
+    args: argparse.Namespace,
+    base_url: str,
+    api_key: str,
+) -> dict[str, Any]:
+    case = {**case, "errors": list(case.get("errors") or [])}
+    artifacts_dir = Path(case["artifacts_dir"])
+    stage_dir = artifacts_dir / "stage2_detection_review_router"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    result_path = stage_dir / "stage2b_nonminor_router.json"
+    stage2a_path = _existing_file_path(case.get("stage2a_review_result_path"))
+    stage2a_record = _read_json(stage2a_path) if stage2a_path is not None else {}
+
+    if args.skip_stage2_review:
+        record = {
+            "task_id": f"{case['case_slug']}_stage2b",
+            "case_index": int(case["case_index"]),
+            "case_id": case["case_id"],
+            "case_slug": case["case_slug"],
+            "case_display": case["case_display"],
+            "stage": "stage2b_nonminor_router",
+            "skipped": True,
+            "skip_reason": "skip_stage2_review",
+            "final_non_minor_detection_failure": False,
+            "final_answer": "no",
+            "final_justification": "Skipped because Stage 2 review is disabled.",
+            "error": "",
+            "created_at": _timestamp(),
+        }
+        _write_json(result_path, record)
+    elif args.reuse_existing and result_path.exists():
+        record = _read_json(result_path)
+    else:
+        record = {
+            "task_id": f"{case['case_slug']}_stage2b",
+            "case_index": int(case["case_index"]),
+            "case_id": case["case_id"],
+            "case_slug": case["case_slug"],
+            "case_display": case["case_display"],
+            "stage": "stage2b_nonminor_router",
+            "source_stage2a_result_path": str(stage2a_path) if stage2a_path else "",
+            "source_review_text": stage2a_record.get("raw_response", ""),
+            "first_prompt_file": str(args.stage2b_first_prompt),
+            "second_prompt_file": str(args.stage2b_second_prompt),
+            "model": args.model,
+            "reasoning_effort": args.stage2b_reasoning_effort,
+            "first_raw_response": "",
+            "first_parsed_response": {},
+            "second_raw_response": "",
+            "second_parsed_response": {},
+            "ran_second_pass": False,
+            "second_pass_skip_reason": "",
+            "first_non_minor_detection_failure": "",
+            "first_justification": "",
+            "final_non_minor_detection_failure": "",
+            "final_answer": "",
+            "final_justification": "",
+            "first_usage": {},
+            "second_usage": {},
+            "first_response_model": "",
+            "second_response_model": "",
+            "error": "",
+            "created_at": _timestamp(),
+        }
+        try:
+            if stage2a_record.get("error"):
+                raise RuntimeError(f"Stage 2a review errored: {stage2a_record['error']}")
+            first_raw, first_usage, first_response_model = _chat_text(
+                model=args.model,
+                prompt_text=_stage2_first_prompt(first_prompt, stage2a_record),
+                temperature=args.temperature,
+                max_tokens=args.stage2b_max_tokens,
+                base_url=base_url,
+                api_key=api_key,
+                reasoning_effort=args.stage2b_reasoning_effort,
+            )
+            first_parsed = _parse_router_response(first_raw)
+            if first_parsed.get("non_minor_detection_failure") is False:
+                second_raw = ""
+                second_usage: dict[str, Any] = {}
+                second_response_model = ""
+                second_parsed = {
+                    "answer": "no",
+                    "non_minor_detection_failure": False,
+                    "trigger_refinement": False,
+                    "severity": "none",
+                    "error_types": [],
+                    "justification": "Skipped because the first pass answered no.",
+                    "rationale": "Skipped because the first pass answered no.",
+                }
+                ran_second_pass = False
+                second_pass_skip_reason = "first_pass_no"
+            else:
+                second_raw, second_usage, second_response_model = _chat_text(
+                    model=args.model,
+                    prompt_text=_stage2_second_prompt(second_prompt, stage2a_record, first_raw, first_parsed),
+                    temperature=args.temperature,
+                    max_tokens=args.stage2b_second_max_tokens,
+                    base_url=base_url,
+                    api_key=api_key,
+                    reasoning_effort=args.stage2b_reasoning_effort,
+                )
+                second_parsed = _parse_router_response(second_raw)
+                ran_second_pass = True
+                second_pass_skip_reason = ""
+            record.update(
+                {
+                    "first_raw_response": first_raw,
+                    "first_parsed_response": first_parsed,
+                    "ran_second_pass": ran_second_pass,
+                    "second_pass_skip_reason": second_pass_skip_reason,
+                    "second_raw_response": second_raw,
+                    "second_parsed_response": second_parsed,
+                    "first_non_minor_detection_failure": first_parsed.get("non_minor_detection_failure"),
+                    "first_justification": first_parsed.get("justification") or first_parsed.get("rationale", ""),
+                    "final_non_minor_detection_failure": second_parsed.get("non_minor_detection_failure"),
+                    "final_answer": second_parsed.get("answer", ""),
+                    "final_justification": second_parsed.get("justification") or second_parsed.get("rationale", ""),
+                    "first_usage": first_usage,
+                    "second_usage": second_usage,
+                    "first_response_model": first_response_model,
+                    "second_response_model": second_response_model,
+                }
+            )
+        except Exception as exc:
+            record["error"] = repr(exc)
+        _write_json(result_path, record)
+
+    if record.get("error"):
+        case["errors"].append(
+            {
+                "stage": "stage2b_nonminor_router",
+                "message": record["error"],
+                "result_path": str(result_path),
+            }
+        )
+    trigger = _boolish(record.get("final_non_minor_detection_failure")) or bool(args.force_stage3_redetect)
+    case.update(
+        {
+            "stage2b_router_result_path": str(result_path),
+            "stage2b_final_non_minor_detection_failure": record.get("final_non_minor_detection_failure", False),
+            "stage2b_final_answer": record.get("final_answer", ""),
+            "stage2b_final_justification": record.get("final_justification", ""),
+            "stage2b_ran_second_pass": bool(record.get("ran_second_pass", False)),
+            "stage2b_router_error": record.get("error", ""),
+            "stage3_redetect_triggered": trigger,
+        }
+    )
+    return case
+
+
+def _run_stage3_case(
+    case: dict[str, Any],
+    stage1_prompt: str,
+    wrapper_prompt: str,
+    args: argparse.Namespace,
+    base_url: str,
+    api_key: str,
+) -> dict[str, Any]:
+    case = {**case, "errors": list(case.get("errors") or [])}
+    artifacts_dir = Path(case["artifacts_dir"])
+    stage_dir = artifacts_dir / "stage3_feedback_redetection"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    result_path = stage_dir / "stage3_feedback_redetection.json"
+    triggered = bool(case.get("stage3_redetect_triggered"))
+    thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
+    overlay_path = _existing_file_path(case.get("stage2a_review_overlay_path")) or _existing_file_path(
+        case.get("source_detector_overlay_path")
+    )
+
+    if not triggered:
+        record = {
+            "task_id": f"{case['case_slug']}_stage3",
+            "case_index": int(case["case_index"]),
+            "case_id": case["case_id"],
+            "case_slug": case["case_slug"],
+            "case_display": case["case_display"],
+            "stage": "stage3_feedback_redetection",
+            "ran": False,
+            "skip_reason": "stage2b_no_non_minor_detection_failure",
+            "detections": [],
+            "stage3_detection_count": 0,
+            "stage3_overlay_path": "",
+            "error": "",
+            "created_at": _timestamp(),
+        }
+        _write_json(result_path, record)
+    elif args.reuse_existing and result_path.exists():
+        record = _read_json(result_path)
+    else:
+        record = {
+            "task_id": f"{case['case_slug']}_stage3",
+            "case_index": int(case["case_index"]),
+            "case_id": case["case_id"],
+            "case_slug": case["case_slug"],
+            "case_display": case["case_display"],
+            "stage": "stage3_feedback_redetection",
+            "ran": True,
+            "skip_reason": "",
+            "prompt_file": str(args.stage3_wrapper_prompt),
+            "stage1_prompt_file": str(args.stage1_prompt),
+            "model": args.model,
+            "reasoning_effort": args.stage3_reasoning_effort,
+            "thumbnail_path": case.get("thumbnail_path", ""),
+            "stage1_raw_overlay_path": str(overlay_path) if overlay_path else "",
+            "stage2a_review_text": case.get("stage2a_review_text", ""),
+            "stage2b_final_justification": case.get("stage2b_final_justification", ""),
+            "raw_response": "",
+            "parsed_response": {},
+            "detections": [],
+            "stage3_detection_count": 0,
+            "stage3_overlay_path": "",
+            "usage": {},
+            "response_model": "",
+            "error": "",
+            "created_at": _timestamp(),
+        }
+        try:
+            if thumbnail_path is None or overlay_path is None:
+                raise FileNotFoundError("Missing Stage 3 thumbnail or previous-overlay input.")
+            prompt = wrapper_prompt.format(
+                reviewer_feedback=str(case.get("stage2a_review_text", "")).strip(),
+                stage1_task_prompt=stage1_prompt.strip(),
+            )
+            raw, usage, response_model = _chat_with_images(
+                model=args.model,
+                prompt_text=prompt,
+                image_paths=[thumbnail_path, overlay_path],
+                temperature=args.temperature,
+                max_tokens=args.stage3_max_tokens,
+                base_url=base_url,
+                api_key=api_key,
+                reasoning_effort=args.stage3_reasoning_effort,
+            )
+            payload = _extract_json_payload(raw)
+            with Image.open(thumbnail_path) as image:
+                thumbnail_size = image.size
+            detections = _normalised_detection_items(payload, thumbnail_size)
+            boxes = [[float(value) for value in det["box_2d_yxyx_normalized"]] for det in detections]
+            redetect_overlay = stage_dir / "stage3_feedback_redetection_overlay.png"
+            _draw_boxes_overlay(
+                thumbnail_path,
+                redetect_overlay,
+                boxes,
+                f"Stage 3 feedback redetection: {len(boxes)}",
+            )
+            record.update(
+                {
+                    "raw_response": raw,
+                    "parsed_response": payload,
+                    "detections": detections,
+                    "stage3_detection_count": len(detections),
+                    "stage3_overlay_path": str(redetect_overlay),
+                    "usage": usage,
+                    "response_model": response_model,
+                }
+            )
+        except Exception as exc:
+            record["error"] = repr(exc)
+        _write_json(result_path, record)
+
+    if record.get("error"):
+        case["errors"].append(
+            {
+                "stage": "stage3_feedback_redetection",
+                "message": record["error"],
+                "result_path": str(result_path),
+            }
+        )
+
+    if record.get("ran") and not record.get("error"):
+        boxes = [
+            [float(value) for value in det.get("box_2d_yxyx_normalized", [])]
+            for det in record.get("detections", [])
+            if det.get("box_2d_yxyx_normalized")
+        ]
+        active_stage = "stage3_feedback_redetection"
+        active_overlay = record.get("stage3_overlay_path", "")
+    else:
+        boxes = [
+            [float(value) for value in box]
+            for box in case.get("stage1_source_boxes_yxyx_normalized", case.get("source_boxes_yxyx_normalized", []))
+        ]
+        active_stage = case.get("stage1_source_stage", "stage1_raw")
+        active_overlay = case.get("source_detector_overlay_path", "")
+
+    case.update(
+        {
+            "stage3_result_path": str(result_path),
+            "stage3_redetect_ran": bool(record.get("ran", False)),
+            "stage3_redetect_error": record.get("error", ""),
+            "stage3_detection_count": int(record.get("stage3_detection_count") or 0),
+            "stage3_boxes_yxyx_normalized": boxes if record.get("ran") and not record.get("error") else [],
+            "stage3_overlay_path": record.get("stage3_overlay_path", ""),
+            "active_source_stage": active_stage,
+            "active_detector_overlay_path": active_overlay,
+            "active_boxes_yxyx_normalized": boxes,
+            "active_box_count": len(boxes),
         }
     )
     return case
@@ -459,10 +995,13 @@ def _build_postprocess_case(
     tasks: list[dict[str, Any]] = []
     thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
     artifacts_dir = Path(case["artifacts_dir"])
-    stage_dir = artifacts_dir / "stage3_source_postprocess"
+    stage_dir = artifacts_dir / "stage4_high_res_crop_redetect"
     stage_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_boxes = [[float(value) for value in box] for box in case.get("source_boxes_yxyx_normalized", [])]
+    raw_boxes = [
+        [float(value) for value in box]
+        for box in case.get("active_boxes_yxyx_normalized", case.get("source_boxes_yxyx_normalized", []))
+    ]
     merged, merge_counts = _merge_yxyx_boxes(
         raw_boxes,
         args.merge_iou_threshold,
@@ -475,14 +1014,23 @@ def _build_postprocess_case(
         post_overlay = str(
             _draw_boxes_overlay(
                 thumbnail_path,
-                stage_dir / "post_stage3_postprocess_overlay.png",
+                stage_dir / "stage4_postprocess_overlay.png",
                 expanded,
-                f"post-source merge + {args.post_stage3_padding_frac:.0%}: {len(expanded)}",
+                f"Stage 4 merge + {args.post_stage3_padding_frac:.0%}: {len(expanded)}",
             )
         )
 
     case.update(
         {
+            "stage4_input_source_stage": case.get("active_source_stage", ""),
+            "stage4_input_boxes_yxyx_normalized": raw_boxes,
+            "stage4_input_box_count": len(raw_boxes),
+            "stage4_merge_counts": merge_counts,
+            "stage4_boxes_yxyx_normalized": merged,
+            "stage4_expanded_boxes_yxyx_normalized": expanded,
+            "stage4_expanded_count": len(expanded),
+            "stage4_overlay_path": post_overlay,
+            # Compatibility aliases for older analysis helpers.
             "post_stage3_merge_counts": merge_counts,
             "post_stage3_boxes_yxyx_normalized": merged,
             "post_stage3_expanded_boxes_yxyx_normalized": expanded,
@@ -492,22 +1040,22 @@ def _build_postprocess_case(
     )
 
     if args.skip_crop_redetect:
-        _write_json(stage_dir / "stage3_source_postprocess.json", case)
+        _write_json(stage_dir / "stage4_high_res_crop_redetect.json", case)
         return case, tasks
 
     if not expanded:
-        _write_json(stage_dir / "stage3_source_postprocess.json", case)
+        _write_json(stage_dir / "stage4_high_res_crop_redetect.json", case)
         return case, tasks
 
     wsi_size = tuple(int(value) for value in case.get("wsi_size") or [0, 0])
     if wsi_size[0] <= 0 or wsi_size[1] <= 0:
         case["errors"].append(
             {
-                "stage": "stage3_source_postprocess",
+                "stage": "stage4_high_res_crop_redetect",
                 "message": "Missing WSI dimensions; cannot read postprocessed crops.",
             }
         )
-        _write_json(stage_dir / "stage3_source_postprocess.json", case)
+        _write_json(stage_dir / "stage4_high_res_crop_redetect.json", case)
         return case, tasks
 
     try:
@@ -526,7 +1074,7 @@ def _build_postprocess_case(
                     args.crop_max_dim,
                 )
                 read_info["padding_fraction"] = float(args.post_stage3_padding_frac)
-                task_dir = artifacts_dir / "stage4_high_res_crop_redetect" / "inputs" / f"{order:02d}"
+                task_dir = stage_dir / "inputs" / f"{order:02d}"
                 task_dir.mkdir(parents=True, exist_ok=True)
                 crop_path = task_dir / "crop.png"
                 source_overlay_path = task_dir / "source_box_overlay.png"
@@ -544,14 +1092,14 @@ def _build_postprocess_case(
                     "case_slug": case["case_slug"],
                     "case_display": case["case_display"],
                     "task_dir": str(task_dir),
-                    "source_stage": case["source_stage"],
+                    "source_stage": case.get("active_source_stage", ""),
                     "source_order": order,
                     "source_box_yxyx_normalized": source_box,
                     "padded_box_yxyx_normalized": padded_box,
                     "crop_path": str(crop_path),
                     "source_overlay_path": str(source_overlay_path),
                     "thumbnail_path": case.get("thumbnail_path", ""),
-                    "source_detector_overlay_path": case.get("source_detector_overlay_path", ""),
+                    "source_detector_overlay_path": case.get("active_detector_overlay_path", ""),
                     "wsi_path": case["wsi_path"],
                     "wsi_reader": reader,
                     "wsi_size": list(wsi_size),
@@ -566,12 +1114,12 @@ def _build_postprocess_case(
     except Exception as exc:
         case["errors"].append(
             {
-                "stage": "stage3_source_postprocess",
+                "stage": "stage4_high_res_crop_redetect",
                 "message": repr(exc),
             }
         )
 
-    _write_json(stage_dir / "stage3_source_postprocess.json", case)
+    _write_json(stage_dir / "stage4_high_res_crop_redetect.json", case)
     return case, tasks
 
 
@@ -665,14 +1213,14 @@ def _build_classification_inputs_case(
     if args.skip_crop_redetect:
         boxes = [
             [float(value) for value in box]
-            for box in case.get("post_stage3_boxes_yxyx_normalized", [])
+            for box in case.get("stage4_boxes_yxyx_normalized", case.get("post_stage3_boxes_yxyx_normalized", []))
         ]
         crop_redetect_detection_count = 0
         crop_redetect_error_count = 0
-        stage5_input_source = "post_stage3_merged_boxes"
-        bbox_source = "post_stage3_merged_no_crop_redetect"
-        overlay_title = f"stage3 direct merge: {len(boxes)}"
-        candidate_suffix = "post_stage3"
+        stage5_input_source = "stage4_merged_boxes"
+        bbox_source = "stage4_merged_no_crop_redetect"
+        overlay_title = f"stage4 direct merge: {len(boxes)}"
+        candidate_suffix = "stage4"
     else:
         detections = []
         for row in redetect_results:
@@ -680,8 +1228,8 @@ def _build_classification_inputs_case(
         boxes = [[float(value) for value in detection["box_2d_yxyx_normalized"]] for detection in detections]
         crop_redetect_detection_count = len(boxes)
         crop_redetect_error_count = sum(1 for row in redetect_results if row.get("error"))
-        stage5_input_source = "post_stage3_high_res_crop_redetect"
-        bbox_source = "post_stage3_high_res_crop_redetect"
+        stage5_input_source = "stage4_high_res_crop_redetect"
+        bbox_source = "stage4_high_res_crop_redetect"
         overlay_title = f"crop redetect merge: {len(boxes)}"
         candidate_suffix = "post_redetect"
 
@@ -1142,8 +1690,14 @@ def _finalize_case(
         "wsi_path": case["wsi_path"],
         "stage_contract": _stage_contract(args),
         "stage_counts": {
-            "stage1_source_boxes": int(case.get("source_box_count") or 0),
-            "post_stage3_expanded_boxes": int(case.get("post_stage3_expanded_count") or 0),
+            "stage1_source_boxes": int(case.get("stage1_source_box_count", case.get("source_box_count")) or 0),
+            "stage2b_triggered_stage3": bool(case.get("stage3_redetect_triggered", False)),
+            "stage2b_ran_second_pass": bool(case.get("stage2b_ran_second_pass", False)),
+            "stage3_redetect_ran": bool(case.get("stage3_redetect_ran", False)),
+            "stage3_redetect_boxes": int(case.get("stage3_detection_count") or 0),
+            "active_source_boxes": int(case.get("active_box_count") or 0),
+            "stage4_input_boxes": int(case.get("stage4_input_box_count") or 0),
+            "stage4_expanded_boxes": int(case.get("stage4_expanded_count", case.get("post_stage3_expanded_count")) or 0),
             "crop_redetect_skipped": bool(args.skip_crop_redetect),
             "crop_redetect_detections": int(case.get("crop_redetect_detection_count") or 0),
             "post_redetect_input_boxes": int(case.get("post_redetect_input_box_count") or 0),
@@ -1187,7 +1741,15 @@ def _finalize_case(
 def _copy_prompts(args: argparse.Namespace) -> None:
     prompt_dir = args.output_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
-    for path in (args.stage1_prompt, args.classification_prompt, args.odd_one_out_prompt):
+    for path in (
+        args.stage1_prompt,
+        args.stage2a_prompt,
+        args.stage2b_first_prompt,
+        args.stage2b_second_prompt,
+        args.stage3_wrapper_prompt,
+        args.classification_prompt,
+        args.odd_one_out_prompt,
+    ):
         (prompt_dir / path.name).write_text(path.read_text().strip() + "\n")
 
 
@@ -1221,6 +1783,7 @@ Max concurrency: {args.max_concurrent}
 Model: {args.model}
 Backend: {args.backend}
 Child stage reproducibility gate skipped: {bool(args.skip_repro)}
+Stage 2 review skipped: {bool(args.skip_stage2_review)}
 Crop-redetect stage skipped: {bool(args.skip_crop_redetect)}
 
 Command:
@@ -1239,9 +1802,22 @@ Key parameters:
 - Stage 1 max retries: {args.stage1_max_retries}
 - Stage 1 repair model: {args.stage1_repair_model or args.model}
 - Stage 1 prompt: {args.stage1_prompt.resolve()}
-- Post-Stage3 merge IoU threshold: {args.merge_iou_threshold}
-- Post-Stage3 overlap-over-smaller threshold: {args.containment_overlap_threshold}
-- Post-Stage3 padding fraction: {args.post_stage3_padding_frac}
+- Stage 2 review skipped: {bool(args.skip_stage2_review)}
+- Stage 2a prompt: {args.stage2a_prompt.resolve()}
+- Stage 2a reasoning effort: {args.stage2a_reasoning_effort}
+- Stage 2a max tokens: {args.stage2a_max_tokens}
+- Stage 2b first prompt: {args.stage2b_first_prompt.resolve()}
+- Stage 2b second prompt: {args.stage2b_second_prompt.resolve()}
+- Stage 2b reasoning effort: {args.stage2b_reasoning_effort}
+- Stage 2b max tokens: {args.stage2b_max_tokens}
+- Stage 2b second max tokens: {args.stage2b_second_max_tokens}
+- Stage 3 wrapper prompt: {args.stage3_wrapper_prompt.resolve()}
+- Stage 3 reasoning effort: {args.stage3_reasoning_effort}
+- Stage 3 max tokens: {args.stage3_max_tokens}
+- Force Stage 3 redetect: {bool(args.force_stage3_redetect)}
+- Stage 4 merge IoU threshold: {args.merge_iou_threshold}
+- Stage 4 overlap-over-smaller threshold: {args.containment_overlap_threshold}
+- Stage 4 padding fraction for crop-redetect context: {args.post_stage3_padding_frac}
 - Crop redetect skipped: {bool(args.skip_crop_redetect)}
 - High-res crop-redetect max dim: {args.crop_max_dim}
 - Classification crop padding fraction: {args.classification_padding_frac}
@@ -1310,9 +1886,21 @@ def _group_by_case(rows: Iterable[dict[str, Any]]) -> dict[int, list[dict[str, A
     return grouped
 
 
+def _read_case_stage_records(cases: list[dict[str, Any]], path_key: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for case in sorted(cases, key=lambda row: int(row["case_index"])):
+        path = _existing_file_path(case.get(path_key))
+        if path is not None:
+            records.append(_read_json(path))
+    return records
+
+
 def _write_intermediate_tables(
     args: argparse.Namespace,
     cases: list[dict[str, Any]],
+    stage2a_results: list[dict[str, Any]],
+    stage2b_results: list[dict[str, Any]],
+    stage3_results: list[dict[str, Any]],
     crop_tasks: list[dict[str, Any]],
     crop_results: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
@@ -1325,6 +1913,9 @@ def _write_intermediate_tables(
         return
     root = args.output_dir / "intermediate_stage_artifacts"
     _write_jsonl(root / "stage1_cases.jsonl", cases)
+    _write_jsonl(root / "stage2a_detection_review_results.jsonl", stage2a_results)
+    _write_jsonl(root / "stage2b_nonminor_router_results.jsonl", stage2b_results)
+    _write_jsonl(root / "stage3_feedback_redetection_results.jsonl", stage3_results)
     _write_jsonl(root / "stage4_crop_redetect_tasks.jsonl", crop_tasks)
     _write_jsonl(root / "stage4_crop_redetect_results.jsonl", crop_results)
     _write_jsonl(root / "stage5_classification_candidates.jsonl", candidates)
@@ -1339,8 +1930,18 @@ def _write_intermediate_tables(
                 "case_index": case["case_index"],
                 "case_id": case["case_id"],
                 "case_display": case["case_display"],
-                "source_box_count": case.get("source_box_count", 0),
-                "post_stage3_expanded_count": case.get("post_stage3_expanded_count", 0),
+                "stage1_source_box_count": case.get("stage1_source_box_count", case.get("source_box_count", 0)),
+                "stage2b_final_non_minor_detection_failure": case.get(
+                    "stage2b_final_non_minor_detection_failure", ""
+                ),
+                "stage2b_ran_second_pass": case.get("stage2b_ran_second_pass", ""),
+                "stage3_redetect_triggered": case.get("stage3_redetect_triggered", ""),
+                "stage3_redetect_ran": case.get("stage3_redetect_ran", ""),
+                "stage3_detection_count": case.get("stage3_detection_count", 0),
+                "active_source_stage": case.get("active_source_stage", ""),
+                "active_box_count": case.get("active_box_count", 0),
+                "stage4_input_box_count": case.get("stage4_input_box_count", 0),
+                "stage4_expanded_count": case.get("stage4_expanded_count", case.get("post_stage3_expanded_count", 0)),
                 "crop_redetect_skipped": bool(case.get("crop_redetect_skipped", False)),
                 "crop_redetect_detection_count": case.get("crop_redetect_detection_count", 0),
                 "post_redetect_input_source": case.get("post_redetect_input_source", ""),
@@ -1357,8 +1958,16 @@ def _write_intermediate_tables(
             "case_index",
             "case_id",
             "case_display",
-            "source_box_count",
-            "post_stage3_expanded_count",
+            "stage1_source_box_count",
+            "stage2b_final_non_minor_detection_failure",
+            "stage2b_ran_second_pass",
+            "stage3_redetect_triggered",
+            "stage3_redetect_ran",
+            "stage3_detection_count",
+            "active_source_stage",
+            "active_box_count",
+            "stage4_input_box_count",
+            "stage4_expanded_count",
             "crop_redetect_skipped",
             "crop_redetect_detection_count",
             "post_redetect_input_source",
@@ -1379,6 +1988,10 @@ def _run_breadth_first(
     api_key: str,
 ) -> list[dict[str, Any]]:
     stage1_prompt = args.stage1_prompt.read_text().strip()
+    stage2a_prompt = args.stage2a_prompt.read_text().strip()
+    stage2b_first_prompt = args.stage2b_first_prompt.read_text().strip()
+    stage2b_second_prompt = args.stage2b_second_prompt.read_text().strip()
+    stage3_wrapper_prompt = args.stage3_wrapper_prompt.read_text().strip()
     classification_prompt = args.classification_prompt.read_text().strip()
     odd_prompt = args.odd_one_out_prompt.read_text().strip()
 
@@ -1390,11 +2003,38 @@ def _run_breadth_first(
     )
     cases.sort(key=lambda case: int(case["case_index"]))
 
+    cases = _parallel_map(
+        cases,
+        lambda case: _run_stage2a_case(case, stage2a_prompt, args, base_url, api_key),
+        args.max_concurrent,
+        "stage2a_detection_review",
+    )
+    cases.sort(key=lambda case: int(case["case_index"]))
+    stage2a_results = _read_case_stage_records(cases, "stage2a_review_result_path")
+
+    cases = _parallel_map(
+        cases,
+        lambda case: _run_stage2b_case(case, stage2b_first_prompt, stage2b_second_prompt, args, base_url, api_key),
+        args.max_concurrent,
+        "stage2b_nonminor_router",
+    )
+    cases.sort(key=lambda case: int(case["case_index"]))
+    stage2b_results = _read_case_stage_records(cases, "stage2b_router_result_path")
+
+    cases = _parallel_map(
+        cases,
+        lambda case: _run_stage3_case(case, stage1_prompt, stage3_wrapper_prompt, args, base_url, api_key),
+        args.max_concurrent,
+        "stage3_feedback_redetection",
+    )
+    cases.sort(key=lambda case: int(case["case_index"]))
+    stage3_results = _read_case_stage_records(cases, "stage3_result_path")
+
     post_results = _parallel_map(
         cases,
         lambda case: _build_postprocess_case(case, args),
         args.max_concurrent,
-        "stage3_source_postprocess",
+        "stage4_high_res_crop_redetect:prepare_inputs",
     )
     cases = [item[0] for item in post_results]
     cases.sort(key=lambda case: int(case["case_index"]))
@@ -1466,6 +2106,9 @@ def _run_breadth_first(
     _write_intermediate_tables(
         args,
         cases,
+        stage2a_results,
+        stage2b_results,
+        stage3_results,
         crop_tasks,
         crop_results,
         candidates,
@@ -1483,10 +2126,17 @@ def _run_depth_first_case(
     base_url: str,
     api_key: str,
     stage1_prompt: str,
+    stage2a_prompt: str,
+    stage2b_first_prompt: str,
+    stage2b_second_prompt: str,
+    stage3_wrapper_prompt: str,
     classification_prompt: str,
     odd_prompt: str,
 ) -> dict[str, Any]:
     case = _run_stage1_case(case, args, base_url, api_key)
+    case = _run_stage2a_case(case, stage2a_prompt, args, base_url, api_key)
+    case = _run_stage2b_case(case, stage2b_first_prompt, stage2b_second_prompt, args, base_url, api_key)
+    case = _run_stage3_case(case, stage1_prompt, stage3_wrapper_prompt, args, base_url, api_key)
     case, crop_tasks = _build_postprocess_case(case, args)
     crop_results = _parallel_map(
         crop_tasks,
@@ -1510,9 +2160,15 @@ def _run_depth_first_case(
     final_record = _finalize_case(case, classification_results, odd_task, odd_result, odd_skipped, args)
     final_record["case_dir"] = case["case_dir"]
     if args.save_all_stage_artifacts:
+        stage2a_results = _read_case_stage_records([case], "stage2a_review_result_path")
+        stage2b_results = _read_case_stage_records([case], "stage2b_router_result_path")
+        stage3_results = _read_case_stage_records([case], "stage3_result_path")
         _write_intermediate_tables(
             args,
             [case],
+            stage2a_results,
+            stage2b_results,
+            stage3_results,
             crop_tasks,
             crop_results,
             candidates,
@@ -1531,6 +2187,10 @@ def _run_depth_first(
     api_key: str,
 ) -> list[dict[str, Any]]:
     stage1_prompt = args.stage1_prompt.read_text().strip()
+    stage2a_prompt = args.stage2a_prompt.read_text().strip()
+    stage2b_first_prompt = args.stage2b_first_prompt.read_text().strip()
+    stage2b_second_prompt = args.stage2b_second_prompt.read_text().strip()
+    stage3_wrapper_prompt = args.stage3_wrapper_prompt.read_text().strip()
     classification_prompt = args.classification_prompt.read_text().strip()
     odd_prompt = args.odd_one_out_prompt.read_text().strip()
     final_records = []
@@ -1543,6 +2203,10 @@ def _run_depth_first(
                 base_url,
                 api_key,
                 stage1_prompt,
+                stage2a_prompt,
+                stage2b_first_prompt,
+                stage2b_second_prompt,
+                stage3_wrapper_prompt,
                 classification_prompt,
                 odd_prompt,
             )
@@ -1551,6 +2215,8 @@ def _run_depth_first(
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.skip_stage2_review and args.force_stage3_redetect:
+        raise SystemExit("--force-stage3-redetect requires Stage 2 review; remove --skip-stage2-review.")
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     input_paths = _resolve_input_paths(args)
@@ -1626,9 +2292,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Skip Stage 4 high-resolution crop redetection. Stage 5 then merges "
-            "the Stage 3 merged boxes directly, rereads them with classification "
+            "the Stage 4 merged boxes directly, rereads them with classification "
             "padding, and continues through classification and comparative filtering."
         ),
+    )
+    parser.add_argument(
+        "--skip-stage2-review",
+        action="store_true",
+        help=(
+            "Skip the Stage 2a/2b review router and the optional Stage 3 feedback "
+            "redetection. Stage 4 then starts from Stage 1 raw boxes."
+        ),
+    )
+    parser.add_argument(
+        "--force-stage3-redetect",
+        action="store_true",
+        help="Run Stage 3 feedback redetection even if Stage 2b does not trigger it.",
     )
     parser.add_argument(
         "--batch-mode",
@@ -1652,6 +2331,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-stdin", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--stage1-prompt", type=Path, default=DEFAULT_STAGE1_PROMPT)
+    parser.add_argument("--stage2a-prompt", type=Path, default=DEFAULT_STAGE2A_PROMPT)
+    parser.add_argument("--stage2b-first-prompt", type=Path, default=DEFAULT_STAGE2B_FIRST_PROMPT)
+    parser.add_argument("--stage2b-second-prompt", type=Path, default=DEFAULT_STAGE2B_SECOND_PROMPT)
+    parser.add_argument("--stage3-wrapper-prompt", type=Path, default=DEFAULT_STAGE3_WRAPPER_PROMPT)
     parser.add_argument("--classification-prompt", type=Path, default=DEFAULT_CLASSIFICATION_PROMPT)
     parser.add_argument("--odd-one-out-prompt", type=Path, default=DEFAULT_ODD_ONE_OUT_PROMPT)
     parser.add_argument("--stage1-thumbnail-max-dim", type=int, default=2048)
@@ -1669,10 +2352,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--post-stage3-padding-frac",
         "--stage3-bbox-padding-frac",
+        "--stage4-bbox-padding-frac",
         dest="post_stage3_padding_frac",
         type=float,
         default=0.15,
-        help="Padding fraction applied to merged source boxes before high-res crop redetection.",
+        help="Padding fraction applied to Stage 4 merged source boxes before high-res crop redetection.",
     )
     parser.add_argument("--classification-padding-frac", type=float, default=0.10)
     parser.add_argument(
@@ -1692,9 +2376,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--crop-max-dim", type=int, default=1024)
     parser.add_argument("--classification-max-dim", type=int, default=1024)
+    parser.add_argument("--stage2a-reasoning-effort", default="high", choices=["low", "medium", "high"])
+    parser.add_argument("--stage2b-reasoning-effort", default="low", choices=["low", "medium", "high"])
+    parser.add_argument("--stage3-reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--crop-redetect-reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--classification-reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--odd-one-out-reasoning-effort", default="high", choices=["low", "medium", "high"])
+    parser.add_argument("--stage2a-max-tokens", type=int, default=1200)
+    parser.add_argument("--stage2b-max-tokens", type=int, default=600)
+    parser.add_argument("--stage2b-second-max-tokens", type=int, default=600)
+    parser.add_argument("--stage3-max-tokens", type=int, default=10000)
     parser.add_argument("--crop-redetect-max-tokens", type=int, default=4000)
     parser.add_argument("--classification-max-tokens", type=int, default=800)
     parser.add_argument("--odd-one-out-max-tokens", type=int, default=16000)
