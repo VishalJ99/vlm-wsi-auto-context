@@ -3,9 +3,9 @@
 
 This entrypoint accepts a single WSI path, a directory of WSIs, or a text file
 with one WSI path per line. It runs the detector-oracle flow: thumbnail Stage 1
-detection, the two-step Stage 2 review/router, optional Stage 3 feedback
-redetection, optional high-resolution crop redetection, crop classification,
-comparative thumbnail-crop filtering, and final bbox export.
+detection, Stage 2 review/routing, optional Stage 3 feedback redetection,
+optional high-resolution crop redetection, crop classification, comparative
+thumbnail-crop filtering, and final bbox export.
 """
 
 from __future__ import annotations
@@ -84,8 +84,9 @@ DEFAULT_ODD_ONE_OUT_PROMPT = (
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"
 DEFAULT_VLLM_URL = "http://localhost:8000/v1"
-PROMPT_VERSION = "detector_pipeline_arbitrary_wsi_v1_2026-05-29"
+PROMPT_VERSION = "detector_pipeline_arbitrary_wsi_v2_firstpass_stage2b_2026-05-29"
 TICKET = "PER-207"
+STAGE2B_TRIGGER_SOURCES = ("first", "adjudicated")
 SUPPORTED_WSI_EXTENSIONS = (
     ".svs",
     ".ndpi",
@@ -114,20 +115,20 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
         "uses Stage 1 raw boxes."
         if args.skip_stage2_review
         else (
-            "Stage 2a free-text review plus Stage 2b two-pass text router. "
-            "The final Stage 2b non-minor-failure boolean controls whether "
+            "Stage 2a free-text review plus Stage 2b text routing. "
+            f"The Stage 2b {args.stage2b_trigger_source!r} route controls whether "
             "Stage 3 feedback redetection runs unless --force-stage3-redetect "
-            "is set."
+            "is set. The default first-pass route skips the old adjudication pass."
         )
     )
     stage3_output = (
         "Skipped because --skip-stage2-review disables the review trigger."
         if args.skip_stage2_review
         else (
-            "Runs only for Stage 2b-positive cases. Positive cases get new "
-            "thumbnail detections from the Stage 3 wrapper prompt; negative "
-            "cases keep the Stage 1 raw boxes unless --force-stage3-redetect "
-            "is set."
+            "Runs only for cases with a positive selected Stage 2b trigger. "
+            "Positive cases get new thumbnail detections from the Stage 3 "
+            "wrapper prompt; negative cases keep the Stage 1 raw boxes unless "
+            "--force-stage3-redetect is set."
         )
     )
     stage4_output = (
@@ -173,7 +174,8 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
             "prompt": (
                 f"2a: {args.stage2a_prompt.resolve()}; "
                 f"2b first: {args.stage2b_first_prompt.resolve()}; "
-                f"2b second: {args.stage2b_second_prompt.resolve()}"
+                f"2b second/adjudication: {args.stage2b_second_prompt.resolve()} "
+                f"(used only when --stage2b-trigger-source adjudicated)"
             ),
             "input_image": (
                 "Stage 2a sees the source thumbnail and Stage 1 raw-overlay image. "
@@ -189,7 +191,7 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
             ),
             "input_image": (
                 "Original whole-slide thumbnail plus previous Stage 1 raw-overlay image, "
-                "only for Stage 2b-positive cases or forced Stage 3 runs."
+                "only for selected Stage 2b-positive cases or forced Stage 3 runs."
             ),
             "output": stage3_output,
         },
@@ -517,6 +519,36 @@ def _boolish(value: Any) -> bool:
     return str(value).strip().lower() in {"true", "yes", "1"}
 
 
+def _stage2b_trigger_selection(record: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    source = str(getattr(args, "stage2b_trigger_source", "first") or "first")
+    if source == "adjudicated":
+        value = record.get("final_non_minor_detection_failure")
+        answer = record.get("final_answer", "")
+        justification = record.get("final_justification", "")
+    else:
+        parsed = record.get("first_parsed_response")
+        if not isinstance(parsed, dict):
+            parsed = {}
+        value = record.get("first_non_minor_detection_failure", parsed.get("non_minor_detection_failure"))
+        answer = parsed.get("answer", "")
+        justification = (
+            record.get("first_justification")
+            or parsed.get("justification")
+            or parsed.get("rationale", "")
+        )
+    selected = _boolish(value)
+    if not answer and isinstance(value, bool):
+        answer = "yes" if value else "no"
+    return {
+        "stage2b_trigger_source": source,
+        "stage2b_trigger_non_minor_detection_failure": selected,
+        "stage2b_trigger_answer": answer,
+        "stage2b_trigger_justification": justification,
+        "stage3_redetect_triggered": selected or bool(args.force_stage3_redetect),
+        "stage3_redetect_trigger_source": "force" if args.force_stage3_redetect else source,
+    }
+
+
 def _stage2_first_prompt(prompt_template: str, review_record: dict[str, Any]) -> str:
     return (
         prompt_template.strip()
@@ -707,9 +739,25 @@ def _run_stage2b_case(
             "stage": "stage2b_nonminor_router",
             "skipped": True,
             "skip_reason": "skip_stage2_review",
+            "trigger_source": args.stage2b_trigger_source,
+            "first_non_minor_detection_failure": False,
+            "first_parsed_response": {
+                "answer": "no",
+                "non_minor_detection_failure": False,
+                "trigger_refinement": False,
+                "severity": "none",
+                "error_types": [],
+                "justification": "Skipped because Stage 2 review is disabled.",
+                "rationale": "Skipped because Stage 2 review is disabled.",
+            },
+            "first_justification": "Skipped because Stage 2 review is disabled.",
+            "ran_second_pass": False,
             "final_non_minor_detection_failure": False,
             "final_answer": "no",
             "final_justification": "Skipped because Stage 2 review is disabled.",
+            "trigger_non_minor_detection_failure": False,
+            "trigger_answer": "no",
+            "trigger_justification": "Skipped because Stage 2 review is disabled.",
             "error": "",
             "created_at": _timestamp(),
         }
@@ -728,6 +776,7 @@ def _run_stage2b_case(
             "source_review_text": stage2a_record.get("raw_response", ""),
             "first_prompt_file": str(args.stage2b_first_prompt),
             "second_prompt_file": str(args.stage2b_second_prompt),
+            "trigger_source": args.stage2b_trigger_source,
             "model": args.model,
             "reasoning_effort": args.stage2b_reasoning_effort,
             "first_raw_response": "",
@@ -741,6 +790,9 @@ def _run_stage2b_case(
             "final_non_minor_detection_failure": "",
             "final_answer": "",
             "final_justification": "",
+            "trigger_non_minor_detection_failure": "",
+            "trigger_answer": "",
+            "trigger_justification": "",
             "first_usage": {},
             "second_usage": {},
             "first_response_model": "",
@@ -761,7 +813,23 @@ def _run_stage2b_case(
                 reasoning_effort=args.stage2b_reasoning_effort,
             )
             first_parsed = _parse_router_response(first_raw)
-            if first_parsed.get("non_minor_detection_failure") is False:
+            if args.stage2b_trigger_source == "first":
+                second_raw = ""
+                second_usage = {}
+                second_response_model = ""
+                second_parsed = {
+                    "answer": "",
+                    "non_minor_detection_failure": None,
+                    "trigger_refinement": None,
+                    "severity": "",
+                    "error_types": [],
+                    "justification": "Skipped because --stage2b-trigger-source first is the default.",
+                    "rationale": "Skipped because --stage2b-trigger-source first is the default.",
+                }
+                ran_second_pass = False
+                second_pass_skip_reason = "trigger_source_first"
+                selected_parsed = first_parsed
+            elif first_parsed.get("non_minor_detection_failure") is False:
                 second_raw = ""
                 second_usage: dict[str, Any] = {}
                 second_response_model = ""
@@ -776,6 +844,7 @@ def _run_stage2b_case(
                 }
                 ran_second_pass = False
                 second_pass_skip_reason = "first_pass_no"
+                selected_parsed = second_parsed
             else:
                 second_raw, second_usage, second_response_model = _chat_text(
                     model=args.model,
@@ -789,6 +858,7 @@ def _run_stage2b_case(
                 second_parsed = _parse_router_response(second_raw)
                 ran_second_pass = True
                 second_pass_skip_reason = ""
+                selected_parsed = second_parsed
             record.update(
                 {
                     "first_raw_response": first_raw,
@@ -799,9 +869,14 @@ def _run_stage2b_case(
                     "second_parsed_response": second_parsed,
                     "first_non_minor_detection_failure": first_parsed.get("non_minor_detection_failure"),
                     "first_justification": first_parsed.get("justification") or first_parsed.get("rationale", ""),
-                    "final_non_minor_detection_failure": second_parsed.get("non_minor_detection_failure"),
-                    "final_answer": second_parsed.get("answer", ""),
-                    "final_justification": second_parsed.get("justification") or second_parsed.get("rationale", ""),
+                    "final_non_minor_detection_failure": selected_parsed.get("non_minor_detection_failure"),
+                    "final_answer": selected_parsed.get("answer", ""),
+                    "final_justification": selected_parsed.get("justification")
+                    or selected_parsed.get("rationale", ""),
+                    "trigger_non_minor_detection_failure": selected_parsed.get("non_minor_detection_failure"),
+                    "trigger_answer": selected_parsed.get("answer", ""),
+                    "trigger_justification": selected_parsed.get("justification")
+                    or selected_parsed.get("rationale", ""),
                     "first_usage": first_usage,
                     "second_usage": second_usage,
                     "first_response_model": first_response_model,
@@ -820,16 +895,21 @@ def _run_stage2b_case(
                 "result_path": str(result_path),
             }
         )
-    trigger = _boolish(record.get("final_non_minor_detection_failure")) or bool(args.force_stage3_redetect)
+    trigger_selection = _stage2b_trigger_selection(record, args)
     case.update(
         {
             "stage2b_router_result_path": str(result_path),
+            "stage2b_first_non_minor_detection_failure": record.get("first_non_minor_detection_failure", False),
+            "stage2b_first_answer": (record.get("first_parsed_response") or {}).get("answer", "")
+            if isinstance(record.get("first_parsed_response"), dict)
+            else "",
+            "stage2b_first_justification": record.get("first_justification", ""),
             "stage2b_final_non_minor_detection_failure": record.get("final_non_minor_detection_failure", False),
             "stage2b_final_answer": record.get("final_answer", ""),
             "stage2b_final_justification": record.get("final_justification", ""),
             "stage2b_ran_second_pass": bool(record.get("ran_second_pass", False)),
             "stage2b_router_error": record.get("error", ""),
-            "stage3_redetect_triggered": trigger,
+            **trigger_selection,
         }
     )
     return case
@@ -863,7 +943,9 @@ def _run_stage3_case(
             "case_display": case["case_display"],
             "stage": "stage3_feedback_redetection",
             "ran": False,
-            "skip_reason": "stage2b_no_non_minor_detection_failure",
+            "skip_reason": "stage2b_selected_trigger_negative",
+            "stage2b_trigger_source": case.get("stage2b_trigger_source", ""),
+            "stage2b_trigger_justification": case.get("stage2b_trigger_justification", ""),
             "detections": [],
             "stage3_detection_count": 0,
             "stage3_overlay_path": "",
@@ -891,6 +973,8 @@ def _run_stage3_case(
             "stage1_raw_overlay_path": str(overlay_path) if overlay_path else "",
             "stage2a_review_text": case.get("stage2a_review_text", ""),
             "stage2b_final_justification": case.get("stage2b_final_justification", ""),
+            "stage2b_trigger_source": case.get("stage2b_trigger_source", ""),
+            "stage2b_trigger_justification": case.get("stage2b_trigger_justification", ""),
             "raw_response": "",
             "parsed_response": {},
             "detections": [],
@@ -1691,6 +1775,13 @@ def _finalize_case(
         "stage_contract": _stage_contract(args),
         "stage_counts": {
             "stage1_source_boxes": int(case.get("stage1_source_box_count", case.get("source_box_count")) or 0),
+            "stage2b_trigger_source": case.get("stage2b_trigger_source", args.stage2b_trigger_source),
+            "stage2b_first_non_minor_detection_failure": case.get(
+                "stage2b_first_non_minor_detection_failure", False
+            ),
+            "stage2b_trigger_non_minor_detection_failure": case.get(
+                "stage2b_trigger_non_minor_detection_failure", False
+            ),
             "stage2b_triggered_stage3": bool(case.get("stage3_redetect_triggered", False)),
             "stage2b_ran_second_pass": bool(case.get("stage2b_ran_second_pass", False)),
             "stage3_redetect_ran": bool(case.get("stage3_redetect_ran", False)),
@@ -1806,11 +1897,12 @@ Key parameters:
 - Stage 2a prompt: {args.stage2a_prompt.resolve()}
 - Stage 2a reasoning effort: {args.stage2a_reasoning_effort}
 - Stage 2a max tokens: {args.stage2a_max_tokens}
+- Stage 2b trigger source: {args.stage2b_trigger_source}
 - Stage 2b first prompt: {args.stage2b_first_prompt.resolve()}
-- Stage 2b second prompt: {args.stage2b_second_prompt.resolve()}
+- Stage 2b second/adjudication prompt: {args.stage2b_second_prompt.resolve()}
 - Stage 2b reasoning effort: {args.stage2b_reasoning_effort}
 - Stage 2b max tokens: {args.stage2b_max_tokens}
-- Stage 2b second max tokens: {args.stage2b_second_max_tokens}
+- Stage 2b second/adjudication max tokens: {args.stage2b_second_max_tokens}
 - Stage 3 wrapper prompt: {args.stage3_wrapper_prompt.resolve()}
 - Stage 3 reasoning effort: {args.stage3_reasoning_effort}
 - Stage 3 max tokens: {args.stage3_max_tokens}
@@ -1854,6 +1946,7 @@ def _write_root_outputs(
         "dry_run": dry_run,
         "batch_mode": args.batch_mode,
         "max_concurrent": args.max_concurrent,
+        "stage2b_trigger_source": args.stage2b_trigger_source,
         "cases": len(final_records),
         "final_boxes": sum(int(record.get("stage_counts", {}).get("final_boxes", 0)) for record in final_records),
         "cases_with_errors": sum(1 for record in final_records if record.get("errors")),
@@ -1931,8 +2024,15 @@ def _write_intermediate_tables(
                 "case_id": case["case_id"],
                 "case_display": case["case_display"],
                 "stage1_source_box_count": case.get("stage1_source_box_count", case.get("source_box_count", 0)),
+                "stage2b_trigger_source": case.get("stage2b_trigger_source", ""),
+                "stage2b_first_non_minor_detection_failure": case.get(
+                    "stage2b_first_non_minor_detection_failure", ""
+                ),
                 "stage2b_final_non_minor_detection_failure": case.get(
                     "stage2b_final_non_minor_detection_failure", ""
+                ),
+                "stage2b_trigger_non_minor_detection_failure": case.get(
+                    "stage2b_trigger_non_minor_detection_failure", ""
                 ),
                 "stage2b_ran_second_pass": case.get("stage2b_ran_second_pass", ""),
                 "stage3_redetect_triggered": case.get("stage3_redetect_triggered", ""),
@@ -1959,7 +2059,10 @@ def _write_intermediate_tables(
             "case_id",
             "case_display",
             "stage1_source_box_count",
+            "stage2b_trigger_source",
+            "stage2b_first_non_minor_detection_failure",
             "stage2b_final_non_minor_detection_failure",
+            "stage2b_trigger_non_minor_detection_failure",
             "stage2b_ran_second_pass",
             "stage3_redetect_triggered",
             "stage3_redetect_ran",
@@ -2232,6 +2335,7 @@ def run(args: argparse.Namespace) -> int:
             "input_paths": [str(path) for path in input_paths],
             "batch_mode": args.batch_mode,
             "max_concurrent": args.max_concurrent,
+            "stage2b_trigger_source": args.stage2b_trigger_source,
             "stage_contract": _stage_contract(args),
             "cases": cases,
         },
@@ -2334,6 +2438,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage2a-prompt", type=Path, default=DEFAULT_STAGE2A_PROMPT)
     parser.add_argument("--stage2b-first-prompt", type=Path, default=DEFAULT_STAGE2B_FIRST_PROMPT)
     parser.add_argument("--stage2b-second-prompt", type=Path, default=DEFAULT_STAGE2B_SECOND_PROMPT)
+    parser.add_argument(
+        "--stage2b-trigger-source",
+        choices=STAGE2B_TRIGGER_SOURCES,
+        default="first",
+        help=(
+            "Which Stage 2b decision controls Stage 3 redetection. The default "
+            "'first' uses the first router pass and skips the second-pass "
+            "adjudicator. Use 'adjudicated' to reproduce the older two-pass gate."
+        ),
+    )
     parser.add_argument("--stage3-wrapper-prompt", type=Path, default=DEFAULT_STAGE3_WRAPPER_PROMPT)
     parser.add_argument("--classification-prompt", type=Path, default=DEFAULT_CLASSIFICATION_PROMPT)
     parser.add_argument("--odd-one-out-prompt", type=Path, default=DEFAULT_ODD_ONE_OUT_PROMPT)

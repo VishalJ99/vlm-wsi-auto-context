@@ -57,27 +57,37 @@ Current integrated stage order:
 1. Stage 1 thumbnail detection with the high-recall tissue-candidate prompt.
 2. Stage 2a free-text missed/overcoverage review on the source thumbnail plus
    Stage 1 raw overlay.
-3. Stage 2b text router over the Stage 2a review.
+3. Stage 2b text router over the Stage 2a review. By default, the first
+   router pass is the Stage 3 trigger and the older adjudication pass is not
+   run.
 4. Optional Stage 3 feedback redetection on the original thumbnail plus raw
-   overlay when Stage 2b triggers, or when `--force-stage3-redetect` is set.
+   overlay when the selected Stage 2b trigger is positive, or when
+   `--force-stage3-redetect` is set.
 5. Stage 4 deterministic merge/padding and optional high-resolution crop
    redetection.
 6. Stage 5 classification-crop construction.
 7. Stage 6 tissue/artifact classification.
 8. Stage 7 comparative thumbnail-crop artifact filtering.
 
-Pilot-100 run matching the latest reviewed packet:
+Current default pilot-100 command with the first-pass Stage 2b trigger:
 
 ```bash
 eval "$(rg '^export (OPENROUTER_API_KEY|OPENAI_API_KEY)=' /homes/vj724/.zshrc)"
 python scripts/run_detector_pipeline.py test-pipeline/pilot_100_wsis.txt \
-  --output-dir test-pipeline-integrated-skip-stage4 \
+  --output-dir test-pipeline-firstpass-default-skip-stage4 \
   --save-all-stage-artifacts \
   --batch-mode breadth-first \
   --max-concurrent 16 \
   --skip-repro \
   --skip-crop-redetect
 ```
+
+The default Stage 2b routing now matches the reviewed first-pass-trigger
+setting: `--stage2b-trigger-source first`. This is the setting used to produce
+the current first-pass-trigger comparison packet:
+`/data2/vj724/vlm-wsi-auto-context/test-pipeline-stage2b-firstpass-trigger-skip-stage4/visuals/stage2b_firstpass_trigger_downstream_comparison.pdf`.
+Use `--stage2b-trigger-source adjudicated` only when reproducing the older
+two-pass non-minor-failure gate.
 
 `--skip-crop-redetect` skips the high-resolution Stage 4 redetection VLM calls.
 The deterministic Stage 4 merge/normalization still runs because Stage 5 needs
@@ -87,7 +97,8 @@ Multi-WSI runs create one subdirectory per WSI filename stem, plus root-level
 `summary.json`, `all_detections.json`, prompt copies, and aggregate JSONL/CSV
 tables when `--save-all-stage-artifacts` is set.
 
-The latest pilot-100 final-detections PDF is:
+The most recent full pilot-100 final-detections PDF predates the first-pass
+default switch and used the older adjudicated trigger:
 `/data2/vj724/vlm-wsi-auto-context/test-pipeline-integrated-skip-stage4/visuals/final_detections_pilot100.pdf`.
 
 ## Reviewer
