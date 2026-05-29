@@ -88,6 +88,13 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text())
 
 
+def _existing_file_path(value: Any) -> Path | None:
+    if not value:
+        return None
+    path = Path(str(value))
+    return path if path.is_file() else None
+
+
 def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
     return [
         {
@@ -336,6 +343,8 @@ def _run_stage1_case(
         if api_key:
             env["OPENROUTER_API_KEY"] = api_key
             env["OPENAI_API_KEY"] = api_key
+        if args.skip_repro:
+            env["WSI_SKIP_STAGE_REPRO_CHECK"] = "1"
         completed = subprocess.run(
             command,
             cwd=REPO_ROOT,
@@ -369,7 +378,7 @@ def _run_stage1_case(
         int(wsi_dims.get("height") or 0),
     ]
     thumbnail_size = None
-    if thumbnail_path.exists():
+    if thumbnail_path.is_file():
         with Image.open(thumbnail_path) as image:
             thumbnail_size = image.size
 
@@ -396,7 +405,7 @@ def _run_stage1_case(
         if bbox.get("box_2d_yxyx_normalized")
     ]
     raw_overlay_path = stage_dir / f"stage1_raw_rot{int(args.stage1_source_rotation)}_overlay.png"
-    if thumbnail_path.exists():
+    if thumbnail_path.is_file():
         _draw_boxes_overlay(
             thumbnail_path,
             raw_overlay_path,
@@ -428,7 +437,7 @@ def _build_postprocess_case(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     case = {**case, "errors": list(case.get("errors") or [])}
     tasks: list[dict[str, Any]] = []
-    thumbnail_path = Path(case.get("thumbnail_path") or "")
+    thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
     artifacts_dir = Path(case["artifacts_dir"])
     stage_dir = artifacts_dir / "stage3_source_postprocess"
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -442,7 +451,7 @@ def _build_postprocess_case(
     expanded = [_expand_yxyx(box, args.post_stage3_padding_frac) for box in merged]
 
     post_overlay = ""
-    if thumbnail_path.exists():
+    if thumbnail_path is not None:
         post_overlay = str(
             _draw_boxes_overlay(
                 thumbnail_path,
@@ -627,7 +636,7 @@ def _build_classification_inputs_case(
     artifacts_dir = Path(case["artifacts_dir"])
     stage_dir = artifacts_dir / "stage5_post_redetect_merge_and_crop"
     stage_dir.mkdir(parents=True, exist_ok=True)
-    thumbnail_path = Path(case.get("thumbnail_path") or "")
+    thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
 
     detections = []
     for row in redetect_results:
@@ -639,7 +648,7 @@ def _build_classification_inputs_case(
         args.containment_overlap_threshold,
     )
     merge_overlay = ""
-    if thumbnail_path.exists():
+    if thumbnail_path is not None:
         merge_overlay = str(
             _draw_boxes_overlay(
                 thumbnail_path,
@@ -808,8 +817,8 @@ def _draw_classification_overlay_case(
         "unknown": "#5f6368",
     }
     overlay_path = ""
-    thumbnail_path = Path(case.get("thumbnail_path") or "")
-    if thumbnail_path.exists():
+    thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
+    if thumbnail_path is not None:
         overlay_path = str(
             _draw_boxes_overlay(
                 thumbnail_path,
@@ -853,8 +862,8 @@ def _build_odd_one_out_task_case(
             "remaining_crop_count": len(yes_rows),
             "skip_reason": "remaining_crop_count_below_2",
         }
-    thumbnail_path = Path(case.get("thumbnail_path") or "")
-    if not thumbnail_path.exists():
+    thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
+    if thumbnail_path is None:
         return None, {
             "case_index": int(case["case_index"]),
             "case_id": case["case_id"],
@@ -1025,8 +1034,8 @@ def _finalize_case(
     case_dir = Path(case["case_dir"])
     case_dir.mkdir(parents=True, exist_ok=True)
     final_overlay_path = case_dir / "final_detected_bboxes.png"
-    thumbnail_path = Path(case.get("thumbnail_path") or "")
-    if thumbnail_path.exists():
+    thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
+    if thumbnail_path is not None:
         _draw_boxes_overlay(
             thumbnail_path,
             final_overlay_path,
@@ -1139,6 +1148,7 @@ Batch mode: {args.batch_mode}
 Max concurrency: {args.max_concurrent}
 Model: {args.model}
 Backend: {args.backend}
+Child stage reproducibility gate skipped: {bool(args.skip_repro)}
 
 Command:
 {_redacted_argv(sys.argv)}
@@ -1164,6 +1174,7 @@ Key parameters:
 - Classification crop max dim: {args.classification_max_dim}
 - Classification prompt: {args.classification_prompt.resolve()}
 - Odd-one-out prompt: {args.odd_one_out_prompt.resolve()}
+- Child Stage 1 reproducibility gate skipped: {bool(args.skip_repro)}
 
 Outputs:
 - Summary JSON: {(args.output_dir / 'summary.json').resolve()}
@@ -1521,6 +1532,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wsi-list", type=Path, default=None, help="Text file with one WSI path per line.")
     parser.add_argument("--output-dir", type=Path, required=True, help="Output directory.")
     parser.add_argument("--save-all-stage-artifacts", action="store_true")
+    parser.add_argument(
+        "--skip-repro",
+        action="store_true",
+        help=(
+            "Set WSI_SKIP_STAGE_REPRO_CHECK=1 for child Stage 1 calls. "
+            "Use this for parent pipeline runs that create their own output directory "
+            "and write root reproduction.txt."
+        ),
+    )
     parser.add_argument(
         "--batch-mode",
         choices=["breadth-first", "depth-first"],
