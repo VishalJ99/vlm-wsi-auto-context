@@ -103,6 +103,7 @@ tmp
 baseline
 baseline_qwen2b_w32
 test-pipeline/
+test-pipeline-no-redetect/
 auto_reviews_batch
 auto_reviews_openrouter_gemini3pro_20260220_155802/
 auto_reviews_openrouter_gemini3pro_preview_20260220_155849/

@@ -3,9 +3,9 @@
 
 This entrypoint accepts a single WSI path, a directory of WSIs, or a text file
 with one WSI path per line. It runs the updated post-Stage-3 detector flow:
-thumbnail Stage 1 detection, deterministic bbox postprocessing, high-resolution
-crop redetection with the same Stage 1 prompt, crop classification, comparative
-thumbnail-crop filtering, and final bbox export.
+thumbnail Stage 1 detection, deterministic bbox postprocessing, optional
+high-resolution crop redetection with the same Stage 1 prompt, crop
+classification, comparative thumbnail-crop filtering, and final bbox export.
 """
 
 from __future__ import annotations
@@ -96,6 +96,30 @@ def _existing_file_path(value: Any) -> Path | None:
 
 
 def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
+    stage3_output = (
+        "Boxes merged with IoU/overlap-over-smaller logic. The unpadded merged "
+        "boxes are forwarded directly to Stage 5; 15% expanded boxes are still "
+        "recorded for comparison, but no Stage 4 crops are read."
+        if args.skip_crop_redetect
+        else (
+            "Boxes merged with IoU/overlap-over-smaller logic, then padded "
+            f"by {args.post_stage3_padding_frac:.3f}; these define the high-res WSI crops."
+        )
+    )
+    crop_redetect_output = (
+        "Skipped by --skip-crop-redetect; Stage 5 reads the Stage 3 merged "
+        "boxes directly."
+        if args.skip_crop_redetect
+        else (
+            "Crop-relative Stage 1 detections mapped back into full-WSI "
+            "normalized 0-1000 coordinates."
+        )
+    )
+    stage5_input = (
+        "No VLM input. Uses Stage 3 merged boxes directly because crop redetection is skipped."
+        if args.skip_crop_redetect
+        else "No VLM input. Uses mapped high-res crop-redetection boxes."
+    )
     return [
         {
             "stage": "stage1_thumbnail_detection",
@@ -114,10 +138,7 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
             "stage": "stage3_source_postprocess",
             "prompt": None,
             "input_image": "No VLM input. Uses current source boxes from Stage 1 raw rotation output.",
-            "output": (
-                "Boxes merged with IoU/overlap-over-smaller logic, then padded "
-                f"by {args.post_stage3_padding_frac:.3f}; these define the high-res WSI crops."
-            ),
+            "output": stage3_output,
         },
         {
             "stage": "stage4_high_res_crop_redetect",
@@ -125,18 +146,17 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
             "input_image": (
                 "High-resolution WSI crops read from the postprocessed boxes, "
                 f"with target max_dim={args.crop_max_dim}."
+                if not args.skip_crop_redetect
+                else "Skipped by --skip-crop-redetect."
             ),
-            "output": (
-                "Crop-relative Stage 1 detections mapped back into full-WSI "
-                "normalized 0-1000 coordinates."
-            ),
+            "output": crop_redetect_output,
         },
         {
             "stage": "stage5_post_redetect_merge_and_crop",
             "prompt": None,
-            "input_image": "No VLM input. Uses mapped high-res crop-redetection boxes.",
+            "input_image": stage5_input,
             "output": (
-                "Mapped boxes merged again, then reread as classification crops "
+                "Input boxes merged again, then reread as classification crops "
                 f"with {args.classification_padding_frac:.3f} padding and "
                 f"target max_dim={args.classification_max_dim}."
             ),
@@ -145,7 +165,7 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
             "stage": "stage6_tissue_artifact_classification",
             "prompt": str(args.classification_prompt.resolve()),
             "input_image": (
-                "High-resolution post-redetect classification crop with the selected bbox overlaid."
+                "High-resolution Stage 5 classification crop with the selected bbox overlaid."
             ),
             "output": "Per-crop yes/no/unknown decision for whether the box is focused on tissue.",
         },
@@ -471,6 +491,10 @@ def _build_postprocess_case(
         }
     )
 
+    if args.skip_crop_redetect:
+        _write_json(stage_dir / "stage3_source_postprocess.json", case)
+        return case, tasks
+
     if not expanded:
         _write_json(stage_dir / "stage3_source_postprocess.json", case)
         return case, tasks
@@ -638,10 +662,29 @@ def _build_classification_inputs_case(
     stage_dir.mkdir(parents=True, exist_ok=True)
     thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
 
-    detections = []
-    for row in redetect_results:
-        detections.extend(row.get("detections_wsi") or [])
-    boxes = [[float(value) for value in detection["box_2d_yxyx_normalized"]] for detection in detections]
+    if args.skip_crop_redetect:
+        boxes = [
+            [float(value) for value in box]
+            for box in case.get("post_stage3_boxes_yxyx_normalized", [])
+        ]
+        crop_redetect_detection_count = 0
+        crop_redetect_error_count = 0
+        stage5_input_source = "post_stage3_merged_boxes"
+        bbox_source = "post_stage3_merged_no_crop_redetect"
+        overlay_title = f"stage3 direct merge: {len(boxes)}"
+        candidate_suffix = "post_stage3"
+    else:
+        detections = []
+        for row in redetect_results:
+            detections.extend(row.get("detections_wsi") or [])
+        boxes = [[float(value) for value in detection["box_2d_yxyx_normalized"]] for detection in detections]
+        crop_redetect_detection_count = len(boxes)
+        crop_redetect_error_count = sum(1 for row in redetect_results if row.get("error"))
+        stage5_input_source = "post_stage3_high_res_crop_redetect"
+        bbox_source = "post_stage3_high_res_crop_redetect"
+        overlay_title = f"crop redetect merge: {len(boxes)}"
+        candidate_suffix = "post_redetect"
+
     merged, merge_counts = _merge_yxyx_boxes(
         boxes,
         args.merge_iou_threshold,
@@ -654,14 +697,17 @@ def _build_classification_inputs_case(
                 thumbnail_path,
                 stage_dir / "post_redetect_merge_overlay.png",
                 merged,
-                f"crop redetect merge: {len(merged)}",
+                f"{overlay_title} -> {len(merged)}",
             )
         )
 
     case.update(
         {
-            "crop_redetect_detection_count": len(boxes),
-            "crop_redetect_error_count": sum(1 for row in redetect_results if row.get("error")),
+            "crop_redetect_skipped": bool(args.skip_crop_redetect),
+            "crop_redetect_detection_count": crop_redetect_detection_count,
+            "crop_redetect_error_count": crop_redetect_error_count,
+            "post_redetect_input_source": stage5_input_source,
+            "post_redetect_input_box_count": len(boxes),
             "post_redetect_merge_counts": merge_counts,
             "post_redetect_boxes_yxyx_normalized": merged,
             "post_redetect_merged_count": len(merged),
@@ -699,7 +745,7 @@ def _build_classification_inputs_case(
                     args.classification_max_dim,
                 )
                 read_info["padding_fraction"] = float(args.classification_padding_frac)
-                candidate_id = f"{order:02d}_post_redetect"
+                candidate_id = f"{order:02d}_{candidate_suffix}"
                 candidate_dir = stage_dir / "candidates" / candidate_id
                 candidate_dir.mkdir(parents=True, exist_ok=True)
                 crop_path = candidate_dir / "crop.png"
@@ -726,7 +772,7 @@ def _build_classification_inputs_case(
                     "candidate_order": order,
                     "candidate_id": candidate_id,
                     "candidate_dir": str(candidate_dir),
-                    "bbox_source": "post_stage3_high_res_crop_redetect",
+                    "bbox_source": bbox_source,
                     "box_2d_yxyx_normalized": box,
                     "crop_path": str(crop_path),
                     "selected_overlay_path": str(selected_overlay_path),
@@ -1098,7 +1144,9 @@ def _finalize_case(
         "stage_counts": {
             "stage1_source_boxes": int(case.get("source_box_count") or 0),
             "post_stage3_expanded_boxes": int(case.get("post_stage3_expanded_count") or 0),
+            "crop_redetect_skipped": bool(args.skip_crop_redetect),
             "crop_redetect_detections": int(case.get("crop_redetect_detection_count") or 0),
+            "post_redetect_input_boxes": int(case.get("post_redetect_input_box_count") or 0),
             "post_redetect_merged_boxes": int(case.get("post_redetect_merged_count") or 0),
             "classification_candidates": int(case.get("classification_candidate_count") or 0),
             "classification_yes": int(case.get("classification_yes_count") or 0),
@@ -1173,6 +1221,7 @@ Max concurrency: {args.max_concurrent}
 Model: {args.model}
 Backend: {args.backend}
 Child stage reproducibility gate skipped: {bool(args.skip_repro)}
+Crop-redetect stage skipped: {bool(args.skip_crop_redetect)}
 
 Command:
 {_redacted_argv(sys.argv)}
@@ -1193,6 +1242,7 @@ Key parameters:
 - Post-Stage3 merge IoU threshold: {args.merge_iou_threshold}
 - Post-Stage3 overlap-over-smaller threshold: {args.containment_overlap_threshold}
 - Post-Stage3 padding fraction: {args.post_stage3_padding_frac}
+- Crop redetect skipped: {bool(args.skip_crop_redetect)}
 - High-res crop-redetect max dim: {args.crop_max_dim}
 - Classification crop padding fraction: {args.classification_padding_frac}
 - Classification crop max dim: {args.classification_max_dim}
@@ -1291,7 +1341,10 @@ def _write_intermediate_tables(
                 "case_display": case["case_display"],
                 "source_box_count": case.get("source_box_count", 0),
                 "post_stage3_expanded_count": case.get("post_stage3_expanded_count", 0),
+                "crop_redetect_skipped": bool(case.get("crop_redetect_skipped", False)),
                 "crop_redetect_detection_count": case.get("crop_redetect_detection_count", 0),
+                "post_redetect_input_source": case.get("post_redetect_input_source", ""),
+                "post_redetect_input_box_count": case.get("post_redetect_input_box_count", 0),
                 "post_redetect_merged_count": case.get("post_redetect_merged_count", 0),
                 "classification_yes_count": case.get("classification_yes_count", 0),
                 "classification_no_count": case.get("classification_no_count", 0),
@@ -1306,7 +1359,10 @@ def _write_intermediate_tables(
             "case_display",
             "source_box_count",
             "post_stage3_expanded_count",
+            "crop_redetect_skipped",
             "crop_redetect_detection_count",
+            "post_redetect_input_source",
+            "post_redetect_input_box_count",
             "post_redetect_merged_count",
             "classification_yes_count",
             "classification_no_count",
@@ -1563,6 +1619,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Set WSI_SKIP_STAGE_REPRO_CHECK=1 for child Stage 1 calls. "
             "Use this for parent pipeline runs that create their own output directory "
             "and write root reproduction.txt."
+        ),
+    )
+    parser.add_argument(
+        "--skip-crop-redetect",
+        action="store_true",
+        help=(
+            "Skip Stage 4 high-resolution crop redetection. Stage 5 then merges "
+            "the Stage 3 merged boxes directly, rereads them with classification "
+            "padding, and continues through classification and comparative filtering."
         ),
     )
     parser.add_argument(
