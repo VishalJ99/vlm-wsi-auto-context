@@ -109,6 +109,8 @@ def _json_status(raw_text: str, payload: Any, detections: list[dict[str, Any]]) 
         pass
     if isinstance(payload, dict) and "raw_text" in payload and not detections:
         return "no_parseable_bbox_payload"
+    if isinstance(payload, list) and not payload:
+        return "recovered_empty_json_array"
     if detections:
         return "recovered_json"
     return "parse_failed"
@@ -221,6 +223,12 @@ def _run_prompt(task: dict[str, Any], args: argparse.Namespace) -> dict[str, Any
     if paths["parsed_json"].exists() and paths["raw_response"].exists() and not args.force:
         raw_text = paths["raw_response"].read_text()
         parsed_record = _read_json(paths["parsed_json"])
+        payload = parsed_record.get("payload")
+        detections = parsed_record.get("detections", [])
+        parse_status = _json_status(raw_text, payload, detections)
+        if parse_status != parsed_record.get("parse_status"):
+            parsed_record["parse_status"] = parse_status
+            _write_json(paths["parsed_json"], parsed_record)
         return {
             **task,
             "status": parsed_record.get("status", "skipped_existing"),
@@ -228,9 +236,9 @@ def _run_prompt(task: dict[str, Any], args: argparse.Namespace) -> dict[str, Any
             "parsed_json_path": str(paths["parsed_json"]),
             "overlay_path": str(paths["overlay"]) if paths["overlay"].exists() else "",
             "raw_response": raw_text,
-            "payload": parsed_record.get("payload"),
-            "detections": parsed_record.get("detections", []),
-            "parse_status": parsed_record.get("parse_status", ""),
+            "payload": payload,
+            "detections": detections,
+            "parse_status": parse_status,
             "usage": parsed_record.get("usage", {}),
             "response_model": parsed_record.get("response_model", ""),
             "error": parsed_record.get("error", ""),
