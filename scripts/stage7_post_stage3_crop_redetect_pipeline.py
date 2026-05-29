@@ -1047,7 +1047,7 @@ def _run_odd_one_out(
         if args.reuse_existing and not args.rerun_incomplete:
             return existing_rows
         for row in existing_rows:
-            if row.get("parse_status") == "ok" and not row.get("error"):
+            if str(row.get("parse_status") or "").startswith("ok") and not row.get("error"):
                 existing_ok[int(row["case_index"])] = row
 
     def run_one(task: dict[str, Any]) -> dict[str, Any]:

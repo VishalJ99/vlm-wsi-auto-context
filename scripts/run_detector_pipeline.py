@@ -940,7 +940,31 @@ def _run_odd_one_out_task(
     stage_dir = Path(task["task_dir"])
     result_path = stage_dir / "odd_one_out_result.json"
     if args.reuse_existing and result_path.exists():
-        return _read_json(result_path)
+        record = _read_json(result_path)
+        raw = str(record.get("raw_response") or "")
+        if raw and not str(record.get("parse_status") or "").startswith("ok"):
+            parsed, route, status = _parse_odd_one_out_response(raw, int(task["patch_count"]))
+            flagged_ids = []
+            if isinstance(parsed, dict):
+                for item in parsed.get("flagged_artifacts", []):
+                    try:
+                        flagged_ids.append(int(item))
+                    except Exception:
+                        continue
+            id_to_order = {int(patch["id"]): int(patch["candidate_order"]) for patch in task["patches"]}
+            record.update(
+                {
+                    "parsed_response": parsed,
+                    "parse_route": route,
+                    "parse_status": status,
+                    "flagged_artifacts": sorted(flagged_ids),
+                    "flagged_candidate_orders": sorted(
+                        id_to_order[item] for item in flagged_ids if item in id_to_order
+                    ),
+                }
+            )
+            _write_json(result_path, record)
+        return record
     record = {
         **task,
         "model": args.model,

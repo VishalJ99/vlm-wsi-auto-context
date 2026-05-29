@@ -155,6 +155,40 @@ def _extract_json_object(text: str) -> tuple[dict[str, Any] | None, str]:
     return None, "unparsed"
 
 
+def _parse_status_ok(status: object) -> bool:
+    return str(status or "").startswith("ok")
+
+
+def _recover_single_flagged_item(payload: dict[str, Any], expected_count: int) -> dict[str, Any] | None:
+    """Recover when the model returns only the inconsistent crop object."""
+    if not {"id", "label"}.issubset(payload):
+        return None
+    try:
+        item_id = int(payload["id"])
+    except Exception:
+        return None
+    if item_id < 1 or item_id > expected_count:
+        return None
+    label = str(payload.get("label", "")).strip().lower().replace("-", "_").replace(" ", "_")
+    artifact_labels = {
+        "artifact",
+        "inconsistent",
+        "outlier",
+        "debris",
+        "not_consensus",
+        "non_consensus",
+        "non_tissue",
+    }
+    if label not in artifact_labels:
+        return None
+    return {
+        "consensus": "",
+        "flagged_artifacts": [item_id],
+        "crops": [dict(payload)],
+        "recovered_from": "single_inconsistent_crop_object",
+    }
+
+
 def _parse_response(text: str, expected_count: int) -> tuple[dict[str, Any] | None, str, str]:
     payload, route = _extract_json_object(text)
     if payload is None:
@@ -164,6 +198,9 @@ def _parse_response(text: str, expected_count: int) -> tuple[dict[str, Any] | No
     if not items_key:
         missing.append("crops_or_patches")
     if missing:
+        recovered = _recover_single_flagged_item(payload, expected_count)
+        if recovered is not None:
+            return recovered, route, "ok_single_flag_recovered"
         return payload, route, f"missing_keys:{','.join(missing)}"
     items = payload.get(items_key)
     flagged = payload.get("flagged_artifacts")
@@ -577,7 +614,7 @@ def _draw_cover(
         bucket["calls"] += 1
         bucket["flagged_cases"] += int(bool(row.get("flagged_artifacts")))
         bucket["flagged_crops"] += len(row.get("flagged_artifacts", []))
-        bucket["parse_not_ok"] += int(row.get("parse_status") != "ok")
+        bucket["parse_not_ok"] += int(not _parse_status_ok(row.get("parse_status")))
     for model, counts in model_counts.items():
         line = (
             f"{model.replace('google/', '')}: calls={counts['calls']} | "
@@ -591,7 +628,7 @@ def _draw_cover(
     rows_to_show = [
         row
         for row in results
-        if row.get("flagged_artifacts") or row.get("parse_status") != "ok" or row.get("error")
+        if row.get("flagged_artifacts") or not _parse_status_ok(row.get("parse_status")) or row.get("error")
     ]
     if not rows_to_show:
         y = _draw_wrapped(draw, (95, y), "No rows were flagged and all parses were ok.", 160, small, "#111111", 22)
@@ -887,7 +924,7 @@ def run(args: argparse.Namespace) -> int:
                 if int(row["case_index"]) not in selected_case_indices or row.get("model") not in args.models:
                     continue
                 key = (int(row["case_index"]), str(row["model"]))
-                if row.get("parse_status") == "ok" and not row.get("error"):
+                if _parse_status_ok(row.get("parse_status")) and not row.get("error"):
                     existing_results[key] = row
         jobs = [
             (case, model)
