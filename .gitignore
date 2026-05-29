@@ -105,6 +105,7 @@ baseline_qwen2b_w32
 test-pipeline/
 test-pipeline-no-redetect/
 test-pipeline-integrated-skip-stage4/
+test-pipeline-stage2b-firstpass-trigger-skip-stage4/
 auto_reviews_batch
 auto_reviews_openrouter_gemini3pro_20260220_155802/
 auto_reviews_openrouter_gemini3pro_preview_20260220_155849/
