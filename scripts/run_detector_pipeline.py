@@ -11,6 +11,7 @@ thumbnail-crop filtering, and final bbox export.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -25,36 +26,33 @@ from typing import Any, Callable, Iterable
 
 from PIL import Image, ImageDraw
 
-from stage1_detection_review_pilot import (
-    _chat_with_images,
-    _extract_json_payload,
-    _font,
-    _load_raw_orientation_bboxes,
-    _normalised_detection_items,
-    _repo_git_commit,
-    _safe_slug,
-    _timestamp,
-)
-from stage1_review_trigger_router import _chat_text, _parse_router_response
-from stage4_crop_prompt_packet import (
-    _normalised_yxyx_to_level0,
-    _pad_level0_bbox,
-    _read_padded_crop,
-)
-from stage6_crop_tp_fp_review import _parse_tissue_yes_no
-from stage6_odd_one_out_artifact_review import _parse_response as _parse_odd_one_out_response
-from stage7_post_stage3_crop_redetect_pipeline import (
-    _crop_pixel_bbox_to_wsi_norm,
-    _draw_boxes_overlay,
-    _draw_crop_detection_overlay,
-    _draw_odd_sheet,
-    _expand_yxyx,
-    _merge_yxyx_boxes,
-    _norm_to_image_bbox,
-    _save_vlm_jpeg,
-    _write_csv,
-    _write_json,
-    _write_jsonl,
+from detector_pipeline_utils import (
+    chat_text as _chat_text,
+    chat_with_images as _chat_with_images,
+    crop_pixel_bbox_to_wsi_norm as _crop_pixel_bbox_to_wsi_norm,
+    draw_boxes_overlay as _draw_boxes_overlay,
+    draw_crop_detection_overlay as _draw_crop_detection_overlay,
+    draw_odd_sheet as _draw_odd_sheet,
+    expand_yxyx as _expand_yxyx,
+    extract_json_payload as _extract_json_payload,
+    font as _font,
+    load_raw_orientation_bboxes as _load_raw_orientation_bboxes,
+    merge_yxyx_boxes as _merge_yxyx_boxes,
+    norm_to_image_bbox as _norm_to_image_bbox,
+    normalised_detection_items as _normalised_detection_items,
+    normalised_yxyx_to_level0 as _normalised_yxyx_to_level0,
+    pad_level0_bbox as _pad_level0_bbox,
+    parse_odd_one_out_response as _parse_odd_one_out_response,
+    parse_router_response as _parse_router_response,
+    parse_tissue_yes_no as _parse_tissue_yes_no,
+    read_padded_crop as _read_padded_crop,
+    repo_git_commit as _repo_git_commit,
+    safe_slug as _safe_slug,
+    save_vlm_jpeg as _save_vlm_jpeg,
+    timestamp as _timestamp,
+    write_csv as _write_csv,
+    write_json as _write_json,
+    write_jsonl as _write_jsonl,
 )
 from utils.wsi_backend import close_wsi, get_pyramid_info, load_wsi
 
@@ -84,7 +82,7 @@ DEFAULT_ODD_ONE_OUT_PROMPT = (
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"
 DEFAULT_VLLM_URL = "http://localhost:8000/v1"
-PROMPT_VERSION = "detector_pipeline_arbitrary_wsi_v2_firstpass_stage2b_2026-05-29"
+PROMPT_VERSION = "detector_pipeline_arbitrary_wsi_v3_integration_cleanup_2026-05-30"
 TICKET = "PER-207"
 STAGE2B_TRIGGER_SOURCES = ("first", "adjudicated")
 SUPPORTED_WSI_EXTENSIONS = (
@@ -107,6 +105,112 @@ def _existing_file_path(value: Any) -> Path | None:
         return None
     path = Path(str(value))
     return path if path.is_file() else None
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _prompt_fingerprint(path: Path) -> dict[str, str]:
+    resolved = path.resolve()
+    return {
+        "path": str(resolved),
+        "sha256": _file_sha256(resolved) if resolved.is_file() else "",
+    }
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _cache_payload(stage: str, args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pipeline_version": PROMPT_VERSION,
+        "stage": stage,
+        "backend": args.backend,
+        "model": args.model,
+        "temperature": args.temperature,
+        "inputs": inputs,
+    }
+
+
+def _cache_key(stage: str, args: argparse.Namespace, inputs: dict[str, Any]) -> str:
+    return hashlib.sha256(_stable_json(_cache_payload(stage, args, inputs)).encode("utf-8")).hexdigest()
+
+
+def _cache_sidecar(result_path: Path) -> Path:
+    return result_path.with_name(result_path.name + ".cache.json")
+
+
+def _reuse_allowed(result_path: Path, stage: str, args: argparse.Namespace, inputs: dict[str, Any]) -> bool:
+    if not args.reuse_existing or not result_path.exists():
+        return False
+    sidecar_path = _cache_sidecar(result_path)
+    if not sidecar_path.exists():
+        print(
+            f"{stage}: ignoring reusable artifact without cache fingerprint: {result_path}",
+            flush=True,
+        )
+        return False
+    try:
+        sidecar = _read_json(sidecar_path)
+    except Exception:
+        print(f"{stage}: ignoring reusable artifact with unreadable cache fingerprint: {result_path}", flush=True)
+        return False
+    expected = _cache_key(stage, args, inputs)
+    if sidecar.get("cache_key") != expected:
+        print(f"{stage}: ignoring reusable artifact with stale cache fingerprint: {result_path}", flush=True)
+        return False
+    return True
+
+
+def _write_cache_sidecar(result_path: Path, stage: str, args: argparse.Namespace, inputs: dict[str, Any]) -> None:
+    _write_json(
+        _cache_sidecar(result_path),
+        {
+            "created_at": _timestamp(),
+            "cache_key": _cache_key(stage, args, inputs),
+            "cache_payload": _cache_payload(stage, args, inputs),
+        },
+    )
+
+
+def _add_degraded_fallback(case: dict[str, Any], stage: str, message: str, **extra: Any) -> None:
+    case.setdefault("degraded_fallbacks", []).append(
+        {
+            "stage": stage,
+            "message": message,
+            **extra,
+        }
+    )
+
+
+def _odd_parse_status_ok(status: Any) -> bool:
+    return str(status or "").startswith("ok")
+
+
+def _safe_int_list(values: Iterable[Any]) -> list[int]:
+    parsed = []
+    for value in values:
+        try:
+            parsed.append(int(value))
+        except Exception:
+            continue
+    return parsed
+
+
+def _effective_odd_flagged_orders(odd_result: dict[str, Any] | None) -> set[int]:
+    if not odd_result or odd_result.get("error") or not _odd_parse_status_ok(odd_result.get("parse_status")):
+        return set()
+    if "effective_flagged_candidate_orders" in odd_result:
+        values = odd_result.get("effective_flagged_candidate_orders") or []
+    else:
+        values = odd_result.get("flagged_candidate_orders") or []
+    return set(_safe_int_list(values))
 
 
 def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -167,7 +271,10 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
     stage7_output = (
         "Skipped by --skip-odd-one-out-filter; all Stage 6 tissue-positive boxes are retained."
         if args.skip_odd_one_out_filter
-        else "Candidate orders flagged as tissue-artifact outliers by comparative review."
+        else (
+            "Candidate orders flagged as tissue-artifact outliers by comparative review. "
+            "Flags are applied only when parse_status starts with 'ok'."
+        )
     )
     return [
         {
@@ -378,7 +485,11 @@ def _run_stage1_case(
     base_url: str,
     api_key: str,
 ) -> dict[str, Any]:
-    case = {**case, "errors": list(case.get("errors") or [])}
+    case = {
+        **case,
+        "errors": list(case.get("errors") or []),
+        "degraded_fallbacks": list(case.get("degraded_fallbacks") or []),
+    }
     artifacts_dir = Path(case["artifacts_dir"])
     stage_dir = artifacts_dir / "stage1_thumbnail_detection"
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -386,8 +497,24 @@ def _run_stage1_case(
     bboxes_path = stage_dir / "bboxes.json"
     metadata_path = stage_dir / "metadata.json"
     thumbnail_path = stage_dir / "thumbnail.png"
+    cache_inputs = {
+        "wsi_path": case["wsi_path"],
+        "wsi_reader": args.wsi_reader,
+        "thumbnail_max_dim": args.stage1_thumbnail_max_dim,
+        "coord_order": args.stage1_coord_order,
+        "padding_frac": args.stage1_padding_frac,
+        "merge_overlap_threshold": args.stage1_merge_overlap_threshold,
+        "rotations": list(args.stage1_rotations),
+        "max_retries": args.stage1_max_retries,
+        "repair_model": args.stage1_repair_model or args.model,
+        "prompt": _prompt_fingerprint(args.stage1_prompt),
+    }
+    stage1_failed = False
 
-    if not (args.reuse_existing and bboxes_path.exists() and metadata_path.exists()):
+    if not (
+        metadata_path.exists()
+        and _reuse_allowed(bboxes_path, "stage1_thumbnail_detection", args, cache_inputs)
+    ):
         command = [
             sys.executable,
             str(STAGE1_DETECTOR),
@@ -449,6 +576,7 @@ def _run_stage1_case(
             + completed.stdout
         )
         if completed.returncode != 0:
+            stage1_failed = True
             case["errors"].append(
                 {
                     "stage": "stage1_thumbnail_detection",
@@ -456,6 +584,8 @@ def _run_stage1_case(
                     "log_path": str(log_path),
                 }
             )
+        elif bboxes_path.exists() and metadata_path.exists():
+            _write_cache_sidecar(bboxes_path, "stage1_thumbnail_detection", args, cache_inputs)
 
     metadata = _read_json(metadata_path) if metadata_path.exists() else {}
     wsi_dims = metadata.get("wsi_dimensions") or {}
@@ -483,6 +613,13 @@ def _run_stage1_case(
                 "message": raw_note,
                 "log_path": str(log_path),
             }
+        )
+    if stage1_failed and raw_boxes:
+        _add_degraded_fallback(
+            case,
+            "stage1_thumbnail_detection",
+            "Stage 1 command failed, but existing/partial bbox JSON was readable and used downstream.",
+            result_path=str(bboxes_path),
         )
 
     source_boxes = [
@@ -553,6 +690,7 @@ def _stage2b_trigger_selection(record: dict[str, Any], args: argparse.Namespace)
     return {
         "stage2b_trigger_source": source,
         "stage2b_trigger_non_minor_detection_failure": selected,
+        "stage2b_missed_tissue_trigger": selected,
         "stage2b_trigger_answer": answer,
         "stage2b_trigger_justification": justification,
         "stage3_redetect_triggered": selected or bool(args.force_stage3_redetect),
@@ -614,7 +752,11 @@ def _run_stage2a_case(
     base_url: str,
     api_key: str,
 ) -> dict[str, Any]:
-    case = {**case, "errors": list(case.get("errors") or [])}
+    case = {
+        **case,
+        "errors": list(case.get("errors") or []),
+        "degraded_fallbacks": list(case.get("degraded_fallbacks") or []),
+    }
     artifacts_dir = Path(case["artifacts_dir"])
     stage_dir = artifacts_dir / "stage2_detection_review_router"
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -626,6 +768,17 @@ def _run_stage2a_case(
         [float(value) for value in box]
         for box in case.get("stage1_source_boxes_yxyx_normalized", case.get("source_boxes_yxyx_normalized", []))
     ]
+    cache_inputs = {
+        "case_id": case["case_id"],
+        "wsi_path": case["wsi_path"],
+        "stage1_boxes": boxes,
+        "stage1_raw_parse_status": case.get("stage1_raw_parse_status", ""),
+        "thumbnail_path": case.get("thumbnail_path", ""),
+        "review_overlay_path": str(review_overlay_path),
+        "prompt": _prompt_fingerprint(args.stage2a_prompt),
+        "reasoning_effort": args.stage2a_reasoning_effort,
+        "max_tokens": args.stage2a_max_tokens,
+    }
     if thumbnail_path is not None:
         _draw_boxes_overlay(
             thumbnail_path,
@@ -652,7 +805,7 @@ def _run_stage2a_case(
             "created_at": _timestamp(),
         }
         _write_json(result_path, record)
-    elif args.reuse_existing and result_path.exists():
+    elif _reuse_allowed(result_path, "stage2a_detection_review", args, cache_inputs):
         record = _read_json(result_path)
     else:
         record = {
@@ -702,6 +855,8 @@ def _run_stage2a_case(
         except Exception as exc:
             record["error"] = repr(exc)
         _write_json(result_path, record)
+        if not record.get("error"):
+            _write_cache_sidecar(result_path, "stage2a_detection_review", args, cache_inputs)
 
     if record.get("error"):
         case["errors"].append(
@@ -732,13 +887,28 @@ def _run_stage2b_case(
     base_url: str,
     api_key: str,
 ) -> dict[str, Any]:
-    case = {**case, "errors": list(case.get("errors") or [])}
+    case = {
+        **case,
+        "errors": list(case.get("errors") or []),
+        "degraded_fallbacks": list(case.get("degraded_fallbacks") or []),
+    }
     artifacts_dir = Path(case["artifacts_dir"])
     stage_dir = artifacts_dir / "stage2_detection_review_router"
     stage_dir.mkdir(parents=True, exist_ok=True)
     result_path = stage_dir / "stage2b_nonminor_router.json"
     stage2a_path = _existing_file_path(case.get("stage2a_review_result_path"))
     stage2a_record = _read_json(stage2a_path) if stage2a_path is not None else {}
+    cache_inputs = {
+        "case_id": case["case_id"],
+        "wsi_path": case["wsi_path"],
+        "source_stage2a_result_sha256": _file_sha256(stage2a_path) if stage2a_path else "",
+        "trigger_source": args.stage2b_trigger_source,
+        "first_prompt": _prompt_fingerprint(args.stage2b_first_prompt),
+        "second_prompt": _prompt_fingerprint(args.stage2b_second_prompt),
+        "reasoning_effort": args.stage2b_reasoning_effort,
+        "first_max_tokens": args.stage2b_max_tokens,
+        "second_max_tokens": args.stage2b_second_max_tokens,
+    }
 
     if args.skip_stage2_review:
         record = {
@@ -773,7 +943,7 @@ def _run_stage2b_case(
             "created_at": _timestamp(),
         }
         _write_json(result_path, record)
-    elif args.reuse_existing and result_path.exists():
+    elif _reuse_allowed(result_path, "stage2b_detection_review_router", args, cache_inputs):
         record = _read_json(result_path)
     else:
         record = {
@@ -897,6 +1067,8 @@ def _run_stage2b_case(
         except Exception as exc:
             record["error"] = repr(exc)
         _write_json(result_path, record)
+        if not record.get("error"):
+            _write_cache_sidecar(result_path, "stage2b_detection_review_router", args, cache_inputs)
 
     if record.get("error"):
         case["errors"].append(
@@ -905,6 +1077,12 @@ def _run_stage2b_case(
                 "message": record["error"],
                 "result_path": str(result_path),
             }
+        )
+        _add_degraded_fallback(
+            case,
+            "stage2b_nonminor_router",
+            "Stage 2b router errored; trigger selection falls back to false unless forced.",
+            result_path=str(result_path),
         )
     trigger_selection = _stage2b_trigger_selection(record, args)
     case.update(
@@ -934,7 +1112,11 @@ def _run_stage3_case(
     base_url: str,
     api_key: str,
 ) -> dict[str, Any]:
-    case = {**case, "errors": list(case.get("errors") or [])}
+    case = {
+        **case,
+        "errors": list(case.get("errors") or []),
+        "degraded_fallbacks": list(case.get("degraded_fallbacks") or []),
+    }
     artifacts_dir = Path(case["artifacts_dir"])
     stage_dir = artifacts_dir / "stage3_feedback_redetection"
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -944,6 +1126,24 @@ def _run_stage3_case(
     overlay_path = _existing_file_path(case.get("stage2a_review_overlay_path")) or _existing_file_path(
         case.get("source_detector_overlay_path")
     )
+    cache_inputs = {
+        "case_id": case["case_id"],
+        "wsi_path": case["wsi_path"],
+        "triggered": triggered,
+        "thumbnail_path": case.get("thumbnail_path", ""),
+        "previous_overlay_path": str(overlay_path) if overlay_path else "",
+        "stage2a_review_text_sha256": hashlib.sha256(
+            str(case.get("stage2a_review_text", "")).encode("utf-8")
+        ).hexdigest(),
+        "stage2b_trigger_source": case.get("stage2b_trigger_source", ""),
+        "stage2b_trigger_justification_sha256": hashlib.sha256(
+            str(case.get("stage2b_trigger_justification", "")).encode("utf-8")
+        ).hexdigest(),
+        "stage1_prompt": _prompt_fingerprint(args.stage1_prompt),
+        "wrapper_prompt": _prompt_fingerprint(args.stage3_wrapper_prompt),
+        "reasoning_effort": args.stage3_reasoning_effort,
+        "max_tokens": args.stage3_max_tokens,
+    }
 
     if not triggered:
         record = {
@@ -964,7 +1164,7 @@ def _run_stage3_case(
             "created_at": _timestamp(),
         }
         _write_json(result_path, record)
-    elif args.reuse_existing and result_path.exists():
+    elif _reuse_allowed(result_path, "stage3_feedback_redetection", args, cache_inputs):
         record = _read_json(result_path)
     else:
         record = {
@@ -1039,6 +1239,8 @@ def _run_stage3_case(
         except Exception as exc:
             record["error"] = repr(exc)
         _write_json(result_path, record)
+        if not record.get("error"):
+            _write_cache_sidecar(result_path, "stage3_feedback_redetection", args, cache_inputs)
 
     if record.get("error"):
         case["errors"].append(
@@ -1064,6 +1266,13 @@ def _run_stage3_case(
         ]
         active_stage = case.get("stage1_source_stage", "stage1_raw")
         active_overlay = case.get("source_detector_overlay_path", "")
+        if record.get("ran") and record.get("error"):
+            _add_degraded_fallback(
+                case,
+                "stage3_feedback_redetection",
+                "Stage 3 feedback redetection errored; downstream stages fell back to Stage 1 raw boxes.",
+                result_path=str(result_path),
+            )
 
     case.update(
         {
@@ -1086,7 +1295,11 @@ def _build_postprocess_case(
     case: dict[str, Any],
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    case = {**case, "errors": list(case.get("errors") or [])}
+    case = {
+        **case,
+        "errors": list(case.get("errors") or []),
+        "degraded_fallbacks": list(case.get("degraded_fallbacks") or []),
+    }
     tasks: list[dict[str, Any]] = []
     thumbnail_path = _existing_file_path(case.get("thumbnail_path"))
     artifacts_dir = Path(case["artifacts_dir"])
@@ -1227,7 +1440,19 @@ def _run_crop_redetect_task(
 ) -> dict[str, Any]:
     task_dir = Path(task["task_dir"])
     result_path = task_dir / "crop_redetect_result.json"
-    if args.reuse_existing and result_path.exists():
+    cache_inputs = {
+        "task_id": task["task_id"],
+        "wsi_path": task["wsi_path"],
+        "source_order": task["source_order"],
+        "source_box": task["source_box_yxyx_normalized"],
+        "padded_box": task["padded_box_yxyx_normalized"],
+        "crop_path": task["crop_path"],
+        "read_info": task.get("read_info", {}),
+        "prompt": _prompt_fingerprint(args.stage1_prompt),
+        "reasoning_effort": args.crop_redetect_reasoning_effort,
+        "max_tokens": args.crop_redetect_max_tokens,
+    }
+    if _reuse_allowed(result_path, "stage4_high_res_crop_redetect", args, cache_inputs):
         return _read_json(result_path)
 
     record = {
@@ -1290,6 +1515,8 @@ def _run_crop_redetect_task(
         record["error"] = repr(exc)
         record["parser_status"] = "error"
     _write_json(result_path, record)
+    if not record.get("error"):
+        _write_cache_sidecar(result_path, "stage4_high_res_crop_redetect", args, cache_inputs)
     return record
 
 
@@ -1298,7 +1525,11 @@ def _build_classification_inputs_case(
     redetect_results: list[dict[str, Any]],
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    case = {**case, "errors": list(case.get("errors") or [])}
+    case = {
+        **case,
+        "errors": list(case.get("errors") or []),
+        "degraded_fallbacks": list(case.get("degraded_fallbacks") or []),
+    }
     candidates: list[dict[str, Any]] = []
     artifacts_dir = Path(case["artifacts_dir"])
     stage_dir = artifacts_dir / "stage5_post_redetect_merge_and_crop"
@@ -1323,6 +1554,13 @@ def _build_classification_inputs_case(
         boxes = [[float(value) for value in detection["box_2d_yxyx_normalized"]] for detection in detections]
         crop_redetect_detection_count = len(boxes)
         crop_redetect_error_count = sum(1 for row in redetect_results if row.get("error"))
+        if crop_redetect_error_count:
+            _add_degraded_fallback(
+                case,
+                "stage4_high_res_crop_redetect",
+                "One or more high-resolution crop-redetect tasks errored; Stage 5 used successful crop detections only.",
+                error_count=crop_redetect_error_count,
+            )
         stage5_input_source = "stage4_high_res_crop_redetect"
         bbox_source = "stage4_high_res_crop_redetect"
         overlay_title = f"crop redetect merge: {len(boxes)}"
@@ -1452,7 +1690,19 @@ def _run_classification_candidate(
 ) -> dict[str, Any]:
     candidate_dir = Path(candidate["candidate_dir"])
     result_path = candidate_dir / "classification_result.json"
-    if args.reuse_existing and result_path.exists():
+    cache_inputs = {
+        "task_id": candidate["task_id"],
+        "wsi_path": candidate["wsi_path"],
+        "candidate_order": candidate["candidate_order"],
+        "bbox_source": candidate["bbox_source"],
+        "box": candidate["box_2d_yxyx_normalized"],
+        "selected_overlay_path": candidate["selected_overlay_path"],
+        "read_info": candidate.get("read_info", {}),
+        "prompt": _prompt_fingerprint(args.classification_prompt),
+        "reasoning_effort": args.classification_reasoning_effort,
+        "max_tokens": args.classification_max_tokens,
+    }
+    if _reuse_allowed(result_path, "stage6_tissue_artifact_classification", args, cache_inputs):
         return _read_json(result_path)
 
     record = {
@@ -1490,6 +1740,8 @@ def _run_classification_candidate(
     except Exception as exc:
         record["error"] = repr(exc)
     _write_json(result_path, record)
+    if not record.get("error"):
+        _write_cache_sidecar(result_path, "stage6_tissue_artifact_classification", args, cache_inputs)
     return record
 
 
@@ -1637,6 +1889,32 @@ def _odd_prompt_with_ids(prompt: str, patch_count: int) -> str:
     )
 
 
+def _odd_flag_fields(
+    task: dict[str, Any],
+    parsed: dict[str, Any] | None,
+    status: str,
+) -> dict[str, Any]:
+    flagged_ids = []
+    if isinstance(parsed, dict):
+        for item in parsed.get("flagged_artifacts", []):
+            try:
+                flagged_ids.append(int(item))
+            except Exception:
+                continue
+    id_to_order = {int(patch["id"]): int(patch["candidate_order"]) for patch in task["patches"]}
+    flagged_artifacts = sorted(flagged_ids)
+    flagged_candidate_orders = sorted(id_to_order[item] for item in flagged_ids if item in id_to_order)
+    filter_eligible = _odd_parse_status_ok(status)
+    return {
+        "flagged_artifacts": flagged_artifacts,
+        "flagged_candidate_orders": flagged_candidate_orders,
+        "filter_eligible": filter_eligible,
+        "effective_flagged_artifacts": flagged_artifacts if filter_eligible else [],
+        "effective_flagged_candidate_orders": flagged_candidate_orders if filter_eligible else [],
+        "filter_skip_reason": "" if filter_eligible else f"parse_status:{status or 'empty'}",
+    }
+
+
 def _run_odd_one_out_task(
     task: dict[str, Any],
     prompt: str,
@@ -1646,28 +1924,34 @@ def _run_odd_one_out_task(
 ) -> dict[str, Any]:
     stage_dir = Path(task["task_dir"])
     result_path = stage_dir / "odd_one_out_result.json"
-    if args.reuse_existing and result_path.exists():
+    cache_inputs = {
+        "task_id": task["task_id"],
+        "thumbnail_path": task["thumbnail_path"],
+        "patch_count": task["patch_count"],
+        "patches": [
+            {
+                "id": patch["id"],
+                "candidate_order": patch["candidate_order"],
+                "box": patch["box_2d_yxyx_normalized"],
+                "crop_path": patch["crop_path"],
+            }
+            for patch in task["patches"]
+        ],
+        "prompt": _prompt_fingerprint(args.odd_one_out_prompt),
+        "reasoning_effort": args.odd_one_out_reasoning_effort,
+        "max_tokens": args.odd_one_out_max_tokens,
+    }
+    if _reuse_allowed(result_path, "stage7_comparative_thumbnail_filter", args, cache_inputs):
         record = _read_json(result_path)
         raw = str(record.get("raw_response") or "")
         if raw and not str(record.get("parse_status") or "").startswith("ok"):
             parsed, route, status = _parse_odd_one_out_response(raw, int(task["patch_count"]))
-            flagged_ids = []
-            if isinstance(parsed, dict):
-                for item in parsed.get("flagged_artifacts", []):
-                    try:
-                        flagged_ids.append(int(item))
-                    except Exception:
-                        continue
-            id_to_order = {int(patch["id"]): int(patch["candidate_order"]) for patch in task["patches"]}
             record.update(
                 {
                     "parsed_response": parsed,
                     "parse_route": route,
                     "parse_status": status,
-                    "flagged_artifacts": sorted(flagged_ids),
-                    "flagged_candidate_orders": sorted(
-                        id_to_order[item] for item in flagged_ids if item in id_to_order
-                    ),
+                    **_odd_flag_fields(task, parsed, status),
                 }
             )
             _write_json(result_path, record)
@@ -1682,6 +1966,10 @@ def _run_odd_one_out_task(
         "parse_status": "not_run",
         "flagged_artifacts": [],
         "flagged_candidate_orders": [],
+        "filter_eligible": False,
+        "effective_flagged_artifacts": [],
+        "effective_flagged_candidate_orders": [],
+        "filter_skip_reason": "",
         "error": "",
         "usage": {},
         "response_model": "",
@@ -1699,22 +1987,13 @@ def _run_odd_one_out_task(
             reasoning_effort=args.odd_one_out_reasoning_effort,
         )
         parsed, route, status = _parse_odd_one_out_response(raw, int(task["patch_count"]))
-        flagged_ids = []
-        if isinstance(parsed, dict):
-            for item in parsed.get("flagged_artifacts", []):
-                try:
-                    flagged_ids.append(int(item))
-                except Exception:
-                    continue
-        id_to_order = {int(patch["id"]): int(patch["candidate_order"]) for patch in task["patches"]}
         record.update(
             {
                 "raw_response": raw,
                 "parsed_response": parsed,
                 "parse_route": route,
                 "parse_status": status,
-                "flagged_artifacts": sorted(flagged_ids),
-                "flagged_candidate_orders": sorted(id_to_order[item] for item in flagged_ids if item in id_to_order),
+                **_odd_flag_fields(task, parsed, status),
                 "usage": usage,
                 "response_model": response_model,
             }
@@ -1722,7 +2001,10 @@ def _run_odd_one_out_task(
     except Exception as exc:
         record["error"] = repr(exc)
         record["parse_status"] = "error"
+        record["filter_skip_reason"] = "error"
     _write_json(result_path, record)
+    if not record.get("error"):
+        _write_cache_sidecar(result_path, "stage7_comparative_thumbnail_filter", args, cache_inputs)
     return record
 
 
@@ -1758,9 +2040,23 @@ def _finalize_case(
 ) -> dict[str, Any]:
     rows = sorted(classification_results, key=lambda row: int(row["candidate_order"]))
     yes_rows = [row for row in rows if row.get("tissue_focus_decision") == "yes" and not row.get("error")]
-    flagged_orders = set(int(value) for value in (odd_result or {}).get("flagged_candidate_orders", []))
+    flagged_orders = _effective_odd_flagged_orders(odd_result)
     final_rows = [row for row in yes_rows if int(row["candidate_order"]) not in flagged_orders]
     final_boxes = [[float(value) for value in row["box_2d_yxyx_normalized"]] for row in final_rows]
+    degraded_fallbacks = list(case.get("degraded_fallbacks") or [])
+    odd_parse_status = (odd_result or {}).get("parse_status", "")
+    odd_filter_applied = odd_result is not None and not (odd_result or {}).get("error") and _odd_parse_status_ok(odd_parse_status)
+    if odd_result is not None and not odd_filter_applied:
+        _add_degraded_fallback(
+            {"degraded_fallbacks": degraded_fallbacks},
+            "stage7_comparative_thumbnail_filter",
+            "Odd-one-out response was not applied because the parser status was non-ok.",
+            parse_status=odd_parse_status,
+            result_path=str(Path(odd_result.get("task_dir", "")) / "odd_one_out_result.json")
+            if odd_result.get("task_dir")
+            else "",
+        )
+    pipeline_status = "error" if case.get("errors") else "degraded" if degraded_fallbacks else "ok"
 
     case_dir = Path(case["case_dir"])
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -1771,15 +2067,22 @@ def _finalize_case(
             thumbnail_path,
             final_overlay_path,
             final_boxes,
-            f"final boxes: {len(final_boxes)}",
+            f"final boxes: {len(final_boxes)} | status: {pipeline_status}",
             colors=["#188038"],
         )
 
     odd_sheet_path = ""
     if odd_task is not None:
+        odd_sheet_flagged_artifacts = []
+        if odd_filter_applied:
+            odd_sheet_flagged_artifacts = (
+                (odd_result or {}).get("effective_flagged_artifacts")
+                if "effective_flagged_artifacts" in (odd_result or {})
+                else (odd_result or {}).get("flagged_artifacts", [])
+            )
         odd_sheet_path = _draw_odd_sheet(
             odd_task,
-            set(int(value) for value in (odd_result or {}).get("flagged_artifacts", [])),
+            set(_safe_int_list(odd_sheet_flagged_artifacts or [])),
             Path(case["artifacts_dir"]) / "stage7_comparative_thumbnail_filter" / "odd_one_out_thumbnail_crops.png",
         )
 
@@ -1798,6 +2101,7 @@ def _finalize_case(
         "git_commit": _repo_git_commit(),
         "pipeline_version": PROMPT_VERSION,
         "coordinate_system": "normalized_0_1000_y_min_x_min_y_max_x_max",
+        "pipeline_status": pipeline_status,
         "case_id": case["case_id"],
         "case_display": case["case_display"],
         "wsi_path": case["wsi_path"],
@@ -1811,6 +2115,7 @@ def _finalize_case(
             "stage2b_trigger_non_minor_detection_failure": case.get(
                 "stage2b_trigger_non_minor_detection_failure", False
             ),
+            "stage2b_missed_tissue_trigger": case.get("stage2b_missed_tissue_trigger", False),
             "stage2b_triggered_stage3": bool(case.get("stage3_redetect_triggered", False)),
             "stage2b_ran_second_pass": bool(case.get("stage2b_ran_second_pass", False)),
             "stage3_redetect_ran": bool(case.get("stage3_redetect_ran", False)),
@@ -1829,6 +2134,7 @@ def _finalize_case(
             "odd_one_out_filter_skipped": bool(args.skip_odd_one_out_filter),
             "odd_one_out_flagged": len(flagged_orders),
             "final_boxes": len(final_boxes),
+            "degraded_fallbacks": len(degraded_fallbacks),
         },
         "stage_artifacts_dir": str(Path(case["artifacts_dir"]).resolve())
         if args.save_all_stage_artifacts
@@ -1842,18 +2148,24 @@ def _finalize_case(
         "odd_one_out": {
             "ran": odd_result is not None,
             "filter_skipped": bool(args.skip_odd_one_out_filter),
-            "parse_status": (odd_result or {}).get("parse_status", ""),
+            "filter_applied": odd_filter_applied,
+            "parse_status": odd_parse_status,
+            "filter_skip_reason": (odd_result or {}).get("filter_skip_reason", ""),
             "flagged_candidate_orders": sorted(flagged_orders),
+            "raw_flagged_candidate_orders": sorted(
+                _safe_int_list((odd_result or {}).get("flagged_candidate_orders", []))
+            ),
             "skipped": odd_skipped or {},
             "error": (odd_result or {}).get("error", ""),
         },
         "errors": case.get("errors") or [],
+        "degraded_fallbacks": degraded_fallbacks,
         "detections": detections,
     }
     _write_json(case_dir / "detections.json", case_output)
     _write_case_reproduction(case, args)
 
-    if not args.save_all_stage_artifacts and not case_output["errors"]:
+    if not args.save_all_stage_artifacts and not case_output["errors"] and not case_output["degraded_fallbacks"]:
         artifacts_dir = Path(case["artifacts_dir"])
         if artifacts_dir.exists() and artifacts_dir.name == "intermediate_stage_artifacts":
             shutil.rmtree(artifacts_dir)
@@ -1906,10 +2218,12 @@ Batch mode: {args.batch_mode}
 Max concurrency: {args.max_concurrent}
 Model: {args.model}
 Backend: {args.backend}
+Reuse existing artifacts: {bool(args.reuse_existing)}
 Child stage reproducibility gate skipped: {bool(args.skip_repro)}
 Stage 2 review skipped: {bool(args.skip_stage2_review)}
 Crop-redetect stage skipped: {bool(args.skip_crop_redetect)}
 Odd-one-out filter skipped: {bool(args.skip_odd_one_out_filter)}
+Odd-one-out application rule: Stage 7 removals are applied only when parse_status starts with "ok"; non-ok parses preserve Stage 6 tissue-positive boxes and mark the case degraded.
 
 Command:
 {_redacted_argv(sys.argv)}
@@ -1951,6 +2265,7 @@ Key parameters:
 - Classification prompt: {args.classification_prompt.resolve()}
 - Odd-one-out filter skipped: {bool(args.skip_odd_one_out_filter)}
 - Odd-one-out prompt: {"not used" if args.skip_odd_one_out_filter else str(args.odd_one_out_prompt.resolve())}
+- Reuse existing artifacts: {bool(args.reuse_existing)}; reusable stage artifacts must have a matching sidecar cache fingerprint for this pipeline version, prompts, model/backend, thresholds, skip flags, and stage inputs.
 - Child Stage 1 reproducibility gate skipped: {bool(args.skip_repro)}
 
 Outputs:
@@ -1982,22 +2297,26 @@ def _write_root_outputs(
         "batch_mode": args.batch_mode,
         "max_concurrent": args.max_concurrent,
         "stage2b_trigger_source": args.stage2b_trigger_source,
+        "reuse_existing": bool(args.reuse_existing),
         "skip_odd_one_out_filter": bool(args.skip_odd_one_out_filter),
         "cases": len(final_records),
         "final_boxes": sum(int(record.get("stage_counts", {}).get("final_boxes", 0)) for record in final_records),
         "cases_with_errors": sum(1 for record in final_records if record.get("errors")),
+        "cases_degraded": sum(1 for record in final_records if record.get("degraded_fallbacks")),
         "stage_contract": _stage_contract(args),
         "case_outputs": [
             {
                 "case_id": record.get("case_id"),
                 "case_display": record.get("case_display"),
                 "wsi_path": record.get("wsi_path"),
+                "pipeline_status": record.get("pipeline_status", ""),
                 "final_box_count": record.get("stage_counts", {}).get("final_boxes", 0),
                 "detections_json": str((Path(record.get("case_dir", "")) / "detections.json").resolve())
                 if record.get("case_dir")
                 else "",
                 "final_overlay_png": record.get("paths", {}).get("final_overlay_png", ""),
                 "errors": record.get("errors", []),
+                "degraded_fallbacks": record.get("degraded_fallbacks", []),
             }
             for record in final_records
         ],
@@ -2070,6 +2389,7 @@ def _write_intermediate_tables(
                 "stage2b_trigger_non_minor_detection_failure": case.get(
                     "stage2b_trigger_non_minor_detection_failure", ""
                 ),
+                "stage2b_missed_tissue_trigger": case.get("stage2b_missed_tissue_trigger", ""),
                 "stage2b_ran_second_pass": case.get("stage2b_ran_second_pass", ""),
                 "stage3_redetect_triggered": case.get("stage3_redetect_triggered", ""),
                 "stage3_redetect_ran": case.get("stage3_redetect_ran", ""),
@@ -2088,6 +2408,7 @@ def _write_intermediate_tables(
                 "classification_unknown_count": case.get("classification_unknown_count", 0),
                 "odd_one_out_filter_skipped": bool(args.skip_odd_one_out_filter),
                 "error_count": len(case.get("errors") or []),
+                "degraded_fallback_count": len(case.get("degraded_fallbacks") or []),
             }
             for case in cases
         ],
@@ -2100,6 +2421,7 @@ def _write_intermediate_tables(
             "stage2b_first_non_minor_detection_failure",
             "stage2b_final_non_minor_detection_failure",
             "stage2b_trigger_non_minor_detection_failure",
+            "stage2b_missed_tissue_trigger",
             "stage2b_ran_second_pass",
             "stage3_redetect_triggered",
             "stage3_redetect_ran",
@@ -2118,6 +2440,7 @@ def _write_intermediate_tables(
             "classification_unknown_count",
             "odd_one_out_filter_skipped",
             "error_count",
+            "degraded_fallback_count",
         ],
     )
 
@@ -2391,6 +2714,7 @@ def run(args: argparse.Namespace) -> int:
             "batch_mode": args.batch_mode,
             "max_concurrent": args.max_concurrent,
             "stage2b_trigger_source": args.stage2b_trigger_source,
+            "reuse_existing": bool(args.reuse_existing),
             "skip_odd_one_out_filter": bool(args.skip_odd_one_out_filter),
             "stage_contract": _stage_contract(args),
             "cases": cases,
@@ -2407,9 +2731,11 @@ def run(args: argparse.Namespace) -> int:
                 "case_id": case["case_id"],
                 "case_display": case["case_display"],
                 "wsi_path": case["wsi_path"],
+                "pipeline_status": "dry_run",
                 "stage_counts": {"final_boxes": 0},
                 "paths": {"final_overlay_png": ""},
                 "errors": [],
+                "degraded_fallbacks": [],
                 "dry_run": True,
             }
             _write_json(case_dir / "detections.json", dry_record)

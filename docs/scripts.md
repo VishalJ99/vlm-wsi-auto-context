@@ -92,6 +92,9 @@ two-pass non-minor-failure gate.
 That second pass was a false-positive-redetection reducer; it is no longer the
 default because precision is now handled later by Stage 6 classification and,
 for non-SV40 runs, Stage 7 odd-one-out filtering.
+Some serialized Stage 2b fields still use the older `non_minor_detection_failure`
+name for compatibility with existing PDFs/tables; in the current default flow,
+read that value as the high-recall missed-tissue trigger for Stage 3.
 
 `--skip-crop-redetect` skips the high-resolution Stage 4 redetection VLM calls.
 The deterministic Stage 4 merge/normalization still runs because Stage 5 needs
@@ -100,6 +103,10 @@ normalized boxes.
 `--skip-odd-one-out-filter` skips the final Stage 7 comparative thumbnail
 filter. Final detections then include all Stage 6 tissue-positive boxes. The
 alias `--skip-stage7-filter` is equivalent.
+When Stage 7 runs, comparative removals are applied only if the odd-one-out
+response parser returns an `ok*` status. Non-ok parses preserve all Stage 6
+tissue-positive boxes, record the raw flags separately, and mark the case as
+degraded instead of silently deleting detections.
 
 Use this flag for SV40 runs and process SV40 cases as a separate worklist/output
 root. SV40 control tissue can be real tissue while still looking different from
@@ -111,6 +118,12 @@ Single-WSI runs write `final_detected_bboxes.png`,
 Multi-WSI runs create one subdirectory per WSI filename stem, plus root-level
 `summary.json`, `all_detections.json`, prompt copies, and aggregate JSONL/CSV
 tables when `--save-all-stage-artifacts` is set.
+
+`--reuse-existing` is conservative: a stage output is reused only when its
+sidecar cache fingerprint matches the current pipeline version, model/backend,
+prompt file hashes, relevant thresholds/skip flags, and stage inputs. Legacy
+artifacts without a sidecar fingerprint are rerun rather than silently mixed
+with new pipeline semantics.
 
 The most recent full pilot-100 final-detections PDF predates the first-pass
 default switch and used the older adjudicated trigger:
