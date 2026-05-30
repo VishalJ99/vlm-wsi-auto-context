@@ -67,7 +67,8 @@ Current integrated stage order:
    redetection.
 6. Stage 5 classification-crop construction.
 7. Stage 6 tissue/artifact classification.
-8. Stage 7 comparative thumbnail-crop artifact filtering.
+8. Stage 7 comparative thumbnail-crop artifact filtering, unless
+   `--skip-odd-one-out-filter` is set.
 
 Current default pilot-100 command with the first-pass Stage 2b trigger:
 
@@ -91,7 +92,13 @@ two-pass non-minor-failure gate.
 
 `--skip-crop-redetect` skips the high-resolution Stage 4 redetection VLM calls.
 The deterministic Stage 4 merge/normalization still runs because Stage 5 needs
-normalized boxes. Single-WSI runs write `final_detected_bboxes.png`,
+normalized boxes.
+
+`--skip-odd-one-out-filter` skips the final Stage 7 comparative thumbnail
+filter. Final detections then include all Stage 6 tissue-positive boxes. The
+alias `--skip-stage7-filter` is equivalent.
+
+Single-WSI runs write `final_detected_bboxes.png`,
 `detections.json`, and `reproduction.txt` directly under `--output-dir`.
 Multi-WSI runs create one subdirectory per WSI filename stem, plus root-level
 `summary.json`, `all_detections.json`, prompt copies, and aggregate JSONL/CSV

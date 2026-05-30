@@ -155,6 +155,20 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
         if args.skip_crop_redetect
         else "No VLM input. Uses mapped high-res crop-redetection boxes."
     )
+    stage7_prompt = None if args.skip_odd_one_out_filter else str(args.odd_one_out_prompt.resolve())
+    stage7_input = (
+        "Skipped by --skip-odd-one-out-filter."
+        if args.skip_odd_one_out_filter
+        else (
+            "Thumbnail crops from the source WSI thumbnail for every remaining tissue-positive box; "
+            "this stage runs only when more than one crop remains."
+        )
+    )
+    stage7_output = (
+        "Skipped by --skip-odd-one-out-filter; all Stage 6 tissue-positive boxes are retained."
+        if args.skip_odd_one_out_filter
+        else "Candidate orders flagged as tissue-artifact outliers by comparative review."
+    )
     return [
         {
             "stage": "stage1_thumbnail_detection",
@@ -226,12 +240,9 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
         },
         {
             "stage": "stage7_comparative_thumbnail_filter",
-            "prompt": str(args.odd_one_out_prompt.resolve()),
-            "input_image": (
-                "Thumbnail crops from the source WSI thumbnail for every remaining tissue-positive box; "
-                "this stage runs only when more than one crop remains."
-            ),
-            "output": "Candidate orders flagged as tissue-artifact outliers by comparative review.",
+            "prompt": stage7_prompt,
+            "input_image": stage7_input,
+            "output": stage7_output,
         },
         {
             "stage": "final_detections",
@@ -1600,6 +1611,24 @@ def _build_odd_one_out_task_case(
     return task, None
 
 
+def _skip_odd_one_out_record(
+    case: dict[str, Any],
+    classification_results: list[dict[str, Any]],
+    skip_reason: str,
+) -> dict[str, Any]:
+    remaining = sum(
+        1
+        for row in classification_results
+        if row.get("tissue_focus_decision") == "yes" and not row.get("error")
+    )
+    return {
+        "case_index": int(case["case_index"]),
+        "case_id": case["case_id"],
+        "remaining_crop_count": remaining,
+        "skip_reason": skip_reason,
+    }
+
+
 def _odd_prompt_with_ids(prompt: str, patch_count: int) -> str:
     return (
         prompt.strip()
@@ -1797,6 +1826,7 @@ def _finalize_case(
             "classification_yes": int(case.get("classification_yes_count") or 0),
             "classification_no": int(case.get("classification_no_count") or 0),
             "classification_unknown": int(case.get("classification_unknown_count") or 0),
+            "odd_one_out_filter_skipped": bool(args.skip_odd_one_out_filter),
             "odd_one_out_flagged": len(flagged_orders),
             "final_boxes": len(final_boxes),
         },
@@ -1811,6 +1841,7 @@ def _finalize_case(
         },
         "odd_one_out": {
             "ran": odd_result is not None,
+            "filter_skipped": bool(args.skip_odd_one_out_filter),
             "parse_status": (odd_result or {}).get("parse_status", ""),
             "flagged_candidate_orders": sorted(flagged_orders),
             "skipped": odd_skipped or {},
@@ -1832,15 +1863,17 @@ def _finalize_case(
 def _copy_prompts(args: argparse.Namespace) -> None:
     prompt_dir = args.output_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
-    for path in (
+    prompt_paths = [
         args.stage1_prompt,
         args.stage2a_prompt,
         args.stage2b_first_prompt,
         args.stage2b_second_prompt,
         args.stage3_wrapper_prompt,
         args.classification_prompt,
-        args.odd_one_out_prompt,
-    ):
+    ]
+    if not args.skip_odd_one_out_filter:
+        prompt_paths.append(args.odd_one_out_prompt)
+    for path in prompt_paths:
         (prompt_dir / path.name).write_text(path.read_text().strip() + "\n")
 
 
@@ -1876,6 +1909,7 @@ Backend: {args.backend}
 Child stage reproducibility gate skipped: {bool(args.skip_repro)}
 Stage 2 review skipped: {bool(args.skip_stage2_review)}
 Crop-redetect stage skipped: {bool(args.skip_crop_redetect)}
+Odd-one-out filter skipped: {bool(args.skip_odd_one_out_filter)}
 
 Command:
 {_redacted_argv(sys.argv)}
@@ -1915,7 +1949,8 @@ Key parameters:
 - Classification crop padding fraction: {args.classification_padding_frac}
 - Classification crop max dim: {args.classification_max_dim}
 - Classification prompt: {args.classification_prompt.resolve()}
-- Odd-one-out prompt: {args.odd_one_out_prompt.resolve()}
+- Odd-one-out filter skipped: {bool(args.skip_odd_one_out_filter)}
+- Odd-one-out prompt: {"not used" if args.skip_odd_one_out_filter else str(args.odd_one_out_prompt.resolve())}
 - Child Stage 1 reproducibility gate skipped: {bool(args.skip_repro)}
 
 Outputs:
@@ -1947,6 +1982,7 @@ def _write_root_outputs(
         "batch_mode": args.batch_mode,
         "max_concurrent": args.max_concurrent,
         "stage2b_trigger_source": args.stage2b_trigger_source,
+        "skip_odd_one_out_filter": bool(args.skip_odd_one_out_filter),
         "cases": len(final_records),
         "final_boxes": sum(int(record.get("stage_counts", {}).get("final_boxes", 0)) for record in final_records),
         "cases_with_errors": sum(1 for record in final_records if record.get("errors")),
@@ -2050,6 +2086,7 @@ def _write_intermediate_tables(
                 "classification_yes_count": case.get("classification_yes_count", 0),
                 "classification_no_count": case.get("classification_no_count", 0),
                 "classification_unknown_count": case.get("classification_unknown_count", 0),
+                "odd_one_out_filter_skipped": bool(args.skip_odd_one_out_filter),
                 "error_count": len(case.get("errors") or []),
             }
             for case in cases
@@ -2079,6 +2116,7 @@ def _write_intermediate_tables(
             "classification_yes_count",
             "classification_no_count",
             "classification_unknown_count",
+            "odd_one_out_filter_skipped",
             "error_count",
         ],
     )
@@ -2096,7 +2134,7 @@ def _run_breadth_first(
     stage2b_second_prompt = args.stage2b_second_prompt.read_text().strip()
     stage3_wrapper_prompt = args.stage3_wrapper_prompt.read_text().strip()
     classification_prompt = args.classification_prompt.read_text().strip()
-    odd_prompt = args.odd_one_out_prompt.read_text().strip()
+    odd_prompt = "" if args.skip_odd_one_out_filter else args.odd_one_out_prompt.read_text().strip()
 
     cases = _parallel_map(
         cases,
@@ -2175,19 +2213,31 @@ def _run_breadth_first(
         for case in cases
     ]
 
-    odd_task_pairs = [
-        _build_odd_one_out_task_case(case, class_by_case.get(int(case["case_index"]), []))
-        for case in cases
-    ]
-    odd_tasks = [task for task, _ in odd_task_pairs if task is not None]
-    odd_skipped = [skipped for _, skipped in odd_task_pairs if skipped is not None]
-    odd_results = _parallel_map(
-        odd_tasks,
-        lambda task: _run_odd_one_out_task(task, odd_prompt, args, base_url, api_key),
-        args.max_concurrent,
-        "stage7_comparative_thumbnail_filter",
-    )
-    odd_results.sort(key=lambda row: int(row["case_index"]))
+    if args.skip_odd_one_out_filter:
+        odd_tasks = []
+        odd_skipped = [
+            _skip_odd_one_out_record(
+                case,
+                class_by_case.get(int(case["case_index"]), []),
+                "skip_odd_one_out_filter",
+            )
+            for case in cases
+        ]
+        odd_results = []
+    else:
+        odd_task_pairs = [
+            _build_odd_one_out_task_case(case, class_by_case.get(int(case["case_index"]), []))
+            for case in cases
+        ]
+        odd_tasks = [task for task, _ in odd_task_pairs if task is not None]
+        odd_skipped = [skipped for _, skipped in odd_task_pairs if skipped is not None]
+        odd_results = _parallel_map(
+            odd_tasks,
+            lambda task: _run_odd_one_out_task(task, odd_prompt, args, base_url, api_key),
+            args.max_concurrent,
+            "stage7_comparative_thumbnail_filter",
+        )
+        odd_results.sort(key=lambda row: int(row["case_index"]))
     odd_by_case = {int(row["case_index"]): row for row in odd_results}
     odd_task_by_case = {int(row["case_index"]): row for row in odd_tasks}
     skipped_by_case = {int(row["case_index"]): row for row in odd_skipped}
@@ -2256,10 +2306,15 @@ def _run_depth_first_case(
     )
     classification_results.sort(key=lambda row: int(row["candidate_order"]))
     case = _draw_classification_overlay_case(case, classification_results)
-    odd_task, odd_skipped = _build_odd_one_out_task_case(case, classification_results)
-    odd_result = None
-    if odd_task is not None:
-        odd_result = _run_odd_one_out_task(odd_task, odd_prompt, args, base_url, api_key)
+    if args.skip_odd_one_out_filter:
+        odd_task = None
+        odd_skipped = _skip_odd_one_out_record(case, classification_results, "skip_odd_one_out_filter")
+        odd_result = None
+    else:
+        odd_task, odd_skipped = _build_odd_one_out_task_case(case, classification_results)
+        odd_result = None
+        if odd_task is not None:
+            odd_result = _run_odd_one_out_task(odd_task, odd_prompt, args, base_url, api_key)
     final_record = _finalize_case(case, classification_results, odd_task, odd_result, odd_skipped, args)
     final_record["case_dir"] = case["case_dir"]
     if args.save_all_stage_artifacts:
@@ -2295,7 +2350,7 @@ def _run_depth_first(
     stage2b_second_prompt = args.stage2b_second_prompt.read_text().strip()
     stage3_wrapper_prompt = args.stage3_wrapper_prompt.read_text().strip()
     classification_prompt = args.classification_prompt.read_text().strip()
-    odd_prompt = args.odd_one_out_prompt.read_text().strip()
+    odd_prompt = "" if args.skip_odd_one_out_filter else args.odd_one_out_prompt.read_text().strip()
     final_records = []
     for case in cases:
         print(f"depth-first case {case['case_index']}/{len(cases)}: {case['case_display']}", flush=True)
@@ -2336,6 +2391,7 @@ def run(args: argparse.Namespace) -> int:
             "batch_mode": args.batch_mode,
             "max_concurrent": args.max_concurrent,
             "stage2b_trigger_source": args.stage2b_trigger_source,
+            "skip_odd_one_out_filter": bool(args.skip_odd_one_out_filter),
             "stage_contract": _stage_contract(args),
             "cases": cases,
         },
@@ -2398,6 +2454,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Skip Stage 4 high-resolution crop redetection. Stage 5 then merges "
             "the Stage 4 merged boxes directly, rereads them with classification "
             "padding, and continues through classification and comparative filtering."
+        ),
+    )
+    parser.add_argument(
+        "--skip-odd-one-out-filter",
+        "--skip-stage7-filter",
+        action="store_true",
+        help=(
+            "Skip the final Stage 7 comparative thumbnail odd-one-out filter. "
+            "Final detections then include all Stage 6 tissue-positive boxes."
         ),
     )
     parser.add_argument(
