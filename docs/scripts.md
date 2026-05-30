@@ -89,6 +89,9 @@ the current first-pass-trigger comparison packet:
 `/data2/vj724/vlm-wsi-auto-context/test-pipeline-stage2b-firstpass-trigger-skip-stage4/visuals/stage2b_firstpass_trigger_downstream_comparison.pdf`.
 Use `--stage2b-trigger-source adjudicated` only when reproducing the older
 two-pass non-minor-failure gate.
+That second pass was a false-positive-redetection reducer; it is no longer the
+default because precision is now handled later by Stage 6 classification and,
+for non-SV40 runs, Stage 7 odd-one-out filtering.
 
 `--skip-crop-redetect` skips the high-resolution Stage 4 redetection VLM calls.
 The deterministic Stage 4 merge/normalization still runs because Stage 5 needs
@@ -97,6 +100,11 @@ normalized boxes.
 `--skip-odd-one-out-filter` skips the final Stage 7 comparative thumbnail
 filter. Final detections then include all Stage 6 tissue-positive boxes. The
 alias `--skip-stage7-filter` is equivalent.
+
+Use this flag for SV40 runs and process SV40 cases as a separate worklist/output
+root. SV40 control tissue can be real tissue while still looking different from
+the target tissue, which breaks the Stage 7 homogeneous-tissue assumption and
+can make valid control tissue look like an artifact outlier.
 
 Single-WSI runs write `final_detected_bboxes.png`,
 `detections.json`, and `reproduction.txt` directly under `--output-dir`.

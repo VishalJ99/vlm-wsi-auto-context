@@ -16,6 +16,11 @@ reproduction with `--stage2b-trigger-source adjudicated`.
 
 ## Rationale
 
+The second Stage 2b adjudication pass was originally introduced to reduce false
+positive feedback redetections from the first router pass. That conservative
+gate became too expensive for recall once Stage 2a was reliably identifying
+plausible missed tissue.
+
 The downstream pipeline now has Stage 6 tissue/artifact classification and Stage
 7 comparative artifact removal. That makes it safer to over-include suspected
 tissue at the Stage 2b gate and let downstream filters remove false positives,
