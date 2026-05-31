@@ -182,6 +182,52 @@ relative `file_name` fields. If a framework needs a different object, build a
 thin adapter from the COCO or manifest outputs so the normalized source boxes
 remain auditable.
 
+### `scripts/train_yolo_detector.py`
+PER-241 Ultralytics YOLO distillation runner over a dataset exported by
+`scripts/export_detector_training_dataset.py`.
+
+```bash
+/data2/vj724/venvs/vlm-wsi-yolo-ultralytics-per241/bin/python \
+  scripts/train_yolo_detector.py \
+  --dataset-dir runs/detector_training_datasets/test_pipeline_pilot100_coco_yolo_v1 \
+  --output-root runs/detector_distillation/yolo_pilot100_yolo11n_img1024_e60_v1 \
+  --model /data2/vj724/model_weights/ultralytics/yolo11n.pt \
+  --epochs 60 \
+  --imgsz 1024 \
+  --batch 8 \
+  --device 0 \
+  --workers 4 \
+  --patience 25 \
+  --cache \
+  --conf 0.10 \
+  --overwrite
+```
+
+The runner verifies the Ultralytics dataset layout, trains from the requested
+pretrained YOLO weights, evaluates on the selected split, and writes:
+
+- `metrics_summary.json`: Ultralytics metrics, project-specific metrics, run
+  config, environment, and best-weight path.
+- `project_error_metrics.json`: bbox agreement against exported labels at
+  `--conf`.
+- `project_error_metrics_by_conf.json`: the same project-specific metrics after
+  filtering saved predictions at confidence thresholds from
+  `--metric-conf-thresholds`.
+- `per_case_project_metrics.csv`: per-thumbnail misses, false predictions,
+  duplicate/fragment/overmerge counts, and stain labels.
+- `review/prediction_overlays.pdf`: review packet with green exported boxes and
+  red YOLO predictions.
+- `reproduction.txt`: command, dataset path, environment, and key output paths.
+
+PER-241 pilot runs are under
+`/data2/vj724/vlm-wsi-auto-context/runs/detector_distillation/`. The summary
+root is
+`runs/detector_distillation/yolo_pilot100_per241_summary_v1/summary.csv`.
+On the pilot-100 test split, `yolo11n` at `imgsz=1024` was the best practical
+setting among the small grid. `yolo11s` overpredicted at low confidence and did
+not improve test mAP, so model-size gains were second-order or negative on this
+small dataset.
+
 ## Reviewer
 
 ### `run_vlm_reviewer_batch.py`
