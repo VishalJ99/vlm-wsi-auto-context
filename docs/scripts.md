@@ -194,6 +194,7 @@ PER-241 Ultralytics YOLO distillation runner over a dataset exported by
   --model /data2/vj724/model_weights/ultralytics/yolo11n.pt \
   --epochs 60 \
   --imgsz 1024 \
+  --augment-profile default \
   --batch 8 \
   --device 0 \
   --workers 4 \
@@ -219,6 +220,14 @@ pretrained YOLO weights, evaluates on the selected split, and writes:
   red YOLO predictions.
 - `reproduction.txt`: command, dataset path, environment, and key output paths.
 
+`--augment-profile` controls the augmentation bundle used by Ultralytics:
+
+- `default`: leave Ultralytics augmentation defaults unchanged.
+- `reduced`: disable HSV/geometric/flips/mosaic/mixup/copy-paste for a low
+  augmentation control.
+- `stain-jitter`: increase HSV variation and use light translation/scale plus
+  low mosaic probability for a histology-oriented jitter probe.
+
 PER-241 pilot runs are under
 `/data2/vj724/vlm-wsi-auto-context/runs/detector_distillation/`. The summary
 root is
@@ -227,6 +236,10 @@ On the pilot-100 test split, `yolo11n` at `imgsz=1024` was the best practical
 setting among the small grid. `yolo11s` overpredicted at low confidence and did
 not improve test mAP, so model-size gains were second-order or negative on this
 small dataset.
+
+PER-244 tuning-variance outputs add `yolo11n`/`yolo11s` 1024 px reduced and
+stain-jitter augmentation runs under
+`runs/detector_distillation/yolo_tuning_variance_per244_v1/`.
 
 ### `scripts/train_rfdetr_detector.py`
 PER-242 RF-DETR distillation runner over the PER-240 exported thumbnail bbox
@@ -303,6 +316,27 @@ mAP50-95 0.413 at the one-class evaluator used by this runner, with recall
 0.752 at score threshold 0.25. A lower-learning-rate `nano_e8_lr5e5` sensitivity
 run collapsed at the same threshold, so RF-DETR behavior on this small dataset
 is first-order sensitive to training settings and operating-point calibration.
+
+PER-244 model-size tuning-variance outputs add RF-DETR Small, Medium, and Large
+at the usable `lr=1e-4`, `lr_encoder=1.5e-4` schedule under
+`runs/detector_distillation/rfdetr_model_size_per244_v1/`.
+
+### `scripts/report_detector_tuning_variance.py`
+PER-244 report generator that joins existing YOLO/RF-DETR summary artifacts into
+a single comparison table and variance readout.
+
+```bash
+python scripts/report_detector_tuning_variance.py \
+  --dataset-dir runs/detector_training_datasets/test_pipeline_pilot100_coco_yolo_v1 \
+  --output-dir runs/detector_distillation/per244_tuning_variance_report_v1 \
+  --yolo-baseline-summary runs/detector_distillation/yolo_pilot100_per241_summary_v1/summary.csv \
+  --yolo-tuning-root runs/detector_distillation/yolo_tuning_variance_per244_v1 \
+  --rfdetr-baseline-summary runs/detector_distillation/rfdetr_pilot100_v1/summary_metrics.csv \
+  --rfdetr-tuning-summary runs/detector_distillation/rfdetr_model_size_per244_v1/summary_metrics.csv
+```
+
+The report output root contains `report.md`, `all_metrics.csv`,
+`all_metrics.json`, `variance_summary.json`, and `reproduction.txt`.
 
 ## Reviewer
 
