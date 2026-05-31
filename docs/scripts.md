@@ -129,6 +129,59 @@ The most recent full pilot-100 final-detections PDF predates the first-pass
 default switch and used the older adjudicated trigger:
 `/data2/vj724/vlm-wsi-auto-context/test-pipeline-integrated-skip-stage4/visuals/final_detections_pilot100.pdf`.
 
+### `scripts/export_detector_training_dataset.py`
+PER-240 exporter from detector-pipeline outputs into supervised thumbnail bbox
+datasets. It treats COCO as the canonical detector interchange format and writes
+YOLO labels as a derived view for Ultralytics-style training.
+
+```bash
+python scripts/export_detector_training_dataset.py export test-pipeline \
+  --output-dir runs/detector_training_datasets/test_pipeline_pilot100_coco_yolo_v1 \
+  --overwrite
+```
+
+Input root must contain `all_detections.json` or per-case `detections.json`.
+The exporter reads each case's clean Stage 1 thumbnail from
+`paths.thumbnail_path`, the aggregate Stage 1 case table, or the standard
+per-case `intermediate_stage_artifacts/stage1_thumbnail_detection/thumbnail.png`
+location. If thumbnails are missing, rerun the detector pipeline with
+`--save-all-stage-artifacts`; the exporter does not reconstruct thumbnails by
+reading the WSI.
+
+Default output contract:
+
+- `images/{train,val,test}/*.png`: copied clean thumbnails, the model inputs X.
+- `annotations/instances_{train,val,test,all}.json`: COCO detection JSON with
+  one class, `tissue_candidate`, and pixel-space `xywh` boxes.
+- `labels/{train,val,test}/*.txt` and `dataset.yaml`: derived YOLO labels in
+  `[class, x_center, y_center, width, height]` normalized image coordinates.
+- `manifests/manifest.jsonl`: one JSON object per case preserving source WSI,
+  split, group, thumbnail path, and all original normalized 0-1000
+  `[y_min, x_min, y_max, x_max]` boxes alongside pixel and YOLO conversions.
+- `manifests/manifest.csv`: one row per bbox for quick table inspection.
+- `manifests/cases.csv`: one row per thumbnail/case.
+- `summary.json`, `validation.json`, and `reproduction.txt`.
+
+The default split policy is patient-slide aware: `--group-by auto` derives a
+`patient_<id>_slide_<id>` group when available, keeping serial stains from the
+same patient/slide in the same train/val/test split. Use `--group-by case` only
+for smoke tests or deliberately image-level splits. Use `--image-mode symlink`
+when the downstream trainer can safely dereference source thumbnails in place.
+
+Validate an exported dataset with:
+
+```bash
+python scripts/export_detector_training_dataset.py validate \
+  runs/detector_training_datasets/test_pipeline_pilot100_coco_yolo_v1
+```
+
+Framework ports should consume this export rather than re-parse the detector
+pipeline directly. For Ultralytics, start from `dataset.yaml`. For RF-DETR or
+other COCO-native trainers, start from `annotations/instances_*.json` and the
+relative `file_name` fields. If a framework needs a different object, build a
+thin adapter from the COCO or manifest outputs so the normalized source boxes
+remain auditable.
+
 ## Reviewer
 
 ### `run_vlm_reviewer_batch.py`
