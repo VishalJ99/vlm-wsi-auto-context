@@ -620,6 +620,45 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+def yolo_augmentation_kwargs(profile: str) -> dict[str, float]:
+    """Return Ultralytics train kwargs for the named augmentation profile."""
+    if profile == "default":
+        return {}
+    if profile == "reduced":
+        return {
+            "hsv_h": 0.0,
+            "hsv_s": 0.0,
+            "hsv_v": 0.0,
+            "degrees": 0.0,
+            "translate": 0.0,
+            "scale": 0.0,
+            "shear": 0.0,
+            "perspective": 0.0,
+            "flipud": 0.0,
+            "fliplr": 0.0,
+            "mosaic": 0.0,
+            "mixup": 0.0,
+            "copy_paste": 0.0,
+        }
+    if profile == "stain-jitter":
+        return {
+            "hsv_h": 0.03,
+            "hsv_s": 0.85,
+            "hsv_v": 0.60,
+            "degrees": 0.0,
+            "translate": 0.05,
+            "scale": 0.35,
+            "shear": 0.0,
+            "perspective": 0.0,
+            "flipud": 0.0,
+            "fliplr": 0.5,
+            "mosaic": 0.25,
+            "mixup": 0.0,
+            "copy_paste": 0.0,
+        }
+    raise ValueError(f"Unknown augmentation profile: {profile}")
+
+
 def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
     dataset_dir = Path(args.dataset_dir).resolve()
     output_root = Path(args.output_root).resolve()
@@ -650,6 +689,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
 
     dataset_yaml = dataset_dir / "dataset.yaml"
     model = YOLO(args.model)
+    augmentation_kwargs = yolo_augmentation_kwargs(args.augment_profile)
     train_results = model.train(
         data=str(dataset_yaml),
         epochs=args.epochs,
@@ -666,6 +706,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
         exist_ok=True,
         plots=True,
         verbose=True,
+        **augmentation_kwargs,
     )
     train_dir = Path(getattr(model.trainer, "save_dir", output_root / "ultralytics" / "train"))
     if not train_dir.exists() and hasattr(train_results, "save_dir"):
@@ -752,6 +793,8 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "epochs": args.epochs,
         "imgsz": args.imgsz,
+        "augment_profile": args.augment_profile,
+        "augmentation_kwargs": augmentation_kwargs,
         "batch": args.batch,
         "device": args.device,
         "eval_split": args.eval_split,
@@ -847,6 +890,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="yolov8n.pt", help="Ultralytics model or YAML, e.g. yolov8n.pt.")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--imgsz", type=int, default=1024)
+    parser.add_argument(
+        "--augment-profile",
+        choices=("default", "reduced", "stain-jitter"),
+        default="default",
+        help=(
+            "Named Ultralytics augmentation profile. default leaves Ultralytics "
+            "defaults unchanged; reduced disables geometric/color augmentation; "
+            "stain-jitter increases HSV/color variation with modest scale/translation."
+        ),
+    )
     parser.add_argument("--batch", type=int, default=8, help="Ultralytics batch setting; pass -1 for auto batch.")
     parser.add_argument("--device", default="0", help="Ultralytics device, e.g. 0, 1, cpu.")
     parser.add_argument("--workers", type=int, default=4)

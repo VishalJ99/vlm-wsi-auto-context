@@ -69,3 +69,13 @@ def test_verify_dataset_accepts_exporter_layout(tmp_path: Path) -> None:
 
 def test_parse_thresholds_includes_prediction_floor() -> None:
     assert yolo.parse_thresholds("0.25, 0.50", prediction_floor=0.10) == [0.1, 0.25, 0.5]
+
+
+def test_yolo_augmentation_profiles_are_explicit() -> None:
+    assert yolo.yolo_augmentation_kwargs("default") == {}
+    reduced = yolo.yolo_augmentation_kwargs("reduced")
+    assert reduced["mosaic"] == 0.0
+    assert reduced["hsv_s"] == 0.0
+    stain = yolo.yolo_augmentation_kwargs("stain-jitter")
+    assert stain["hsv_s"] > reduced["hsv_s"]
+    assert stain["mosaic"] > reduced["mosaic"]
