@@ -228,6 +228,82 @@ setting among the small grid. `yolo11s` overpredicted at low confidence and did
 not improve test mAP, so model-size gains were second-order or negative on this
 small dataset.
 
+### `scripts/train_rfdetr_detector.py`
+PER-242 RF-DETR distillation runner over the PER-240 exported thumbnail bbox
+dataset. The PER-240 export is valid COCO, but RF-DETR's package-level trainer
+expects the Roboflow COCO directory shape:
+`train/_annotations.coco.json`, `valid/_annotations.coco.json`, and
+`test/_annotations.coco.json`, with images beside each split annotation file.
+The `prepare` subcommand creates that thin adapter without changing labels.
+
+```bash
+.venv/rfdetr-per242/bin/python scripts/train_rfdetr_detector.py prepare \
+  --source-dataset-dir runs/detector_training_datasets/test_pipeline_pilot100_coco_yolo_v1 \
+  --rfdetr-dataset-dir runs/detector_distillation/rfdetr_pilot100_v1/dataset_rfdetr \
+  --output-root runs/detector_distillation/rfdetr_pilot100_v1 \
+  --image-mode hardlink
+
+RF_HOME=runs/detector_distillation/rfdetr_pilot100_v1/model_cache \
+HF_HOME=/data2/vj724/hf_cache \
+CUDA_VISIBLE_DEVICES=0 \
+.venv/rfdetr-per242/bin/python scripts/train_rfdetr_detector.py train \
+  --source-dataset-dir runs/detector_training_datasets/test_pipeline_pilot100_coco_yolo_v1 \
+  --rfdetr-dataset-dir runs/detector_distillation/rfdetr_pilot100_v1/dataset_rfdetr \
+  --output-root runs/detector_distillation/rfdetr_pilot100_v1 \
+  --run-name nano_e8_lr1e4 \
+  --model-size nano \
+  --epochs 8 \
+  --batch-size 8 \
+  --grad-accum-steps 2 \
+  --lr 1e-4 \
+  --lr-encoder 1.5e-4 \
+  --num-workers 2 \
+  --checkpoint-interval 4 \
+  --device cuda:0 \
+  --no-tensorboard
+```
+
+Evaluate a checkpoint and aggregate runs with:
+
+```bash
+.venv/rfdetr-per242/bin/python scripts/train_rfdetr_detector.py evaluate \
+  --source-dataset-dir runs/detector_training_datasets/test_pipeline_pilot100_coco_yolo_v1 \
+  --rfdetr-dataset-dir runs/detector_distillation/rfdetr_pilot100_v1/dataset_rfdetr \
+  --output-root runs/detector_distillation/rfdetr_pilot100_v1 \
+  --run-name nano_e8_lr1e4 \
+  --model-size nano \
+  --checkpoint runs/detector_distillation/rfdetr_pilot100_v1/runs/nano_e8_lr1e4/train/checkpoint_best_total.pth \
+  --splits val test \
+  --device cuda:0 \
+  --predict-threshold 0.05 \
+  --score-threshold 0.25 \
+  --overlay-max 10
+
+.venv/rfdetr-per242/bin/python scripts/train_rfdetr_detector.py summarize \
+  --output-root runs/detector_distillation/rfdetr_pilot100_v1 \
+  --run-names nano_e8_lr1e4 nano_e8_lr5e5
+```
+
+The runner writes RF-DETR predictions as COCO-style JSON, one-class AP
+summaries, per-image and per-stain project metrics, overlay PNGs/PDFs, and a
+root `reproduction.txt` plus `command_history.jsonl`. Project metrics include
+missed tissue per slide, false boxes per slide, duplicate/fragment proxies,
+oversized/white-space proxies, and SV40 behavior.
+
+Installed RF-DETR `1.7.1` exposed the Apache-licensed detection classes
+`RFDETRNano`, `RFDETRSmall`, `RFDETRMedium`, and `RFDETRLarge`, plus deprecated
+`RFDETRBase`. Current RF-DETR documentation and local package source show a
+DINOv2 backbone, not a direct DINOv3 backbone option. XLarge and 2XLarge require
+the separately licensed `rfdetr_plus` extension and were not used for PER-242.
+
+PER-242 pilot outputs are under
+`/data2/vj724/vlm-wsi-auto-context/runs/detector_distillation/rfdetr_pilot100_v1/`.
+On the held-out test split, `nano_e8_lr1e4` reached mAP50 0.594 and
+mAP50-95 0.413 at the one-class evaluator used by this runner, with recall
+0.752 at score threshold 0.25. A lower-learning-rate `nano_e8_lr5e5` sensitivity
+run collapsed at the same threshold, so RF-DETR behavior on this small dataset
+is first-order sensitive to training settings and operating-point calibration.
+
 ## Reviewer
 
 ### `run_vlm_reviewer_batch.py`
