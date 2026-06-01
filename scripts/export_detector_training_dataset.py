@@ -21,7 +21,7 @@ from PIL import Image
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TICKET = "PER-240"
+DEFAULT_TICKET = "PER-248"
 EXPORT_VERSION = "detector_training_dataset_export_v1_2026-05-31"
 COORDINATE_SYSTEM = "normalized_0_1000_y_min_x_min_y_max_x_max"
 
@@ -125,14 +125,45 @@ def _load_detection_records(pipeline_root: Path) -> list[dict[str, Any]]:
         payload = _read_json(all_detections)
         if not isinstance(payload, list):
             raise ValueError(f"{all_detections} must contain a list of case records")
-        return payload
+        records = payload
+    else:
+        per_case = sorted(pipeline_root.glob("*/detections.json"))
+        if not per_case:
+            raise FileNotFoundError(
+                f"No all_detections.json or per-case */detections.json files found under {pipeline_root}"
+            )
+        records = [_read_json(path) for path in per_case]
 
-    per_case = sorted(pipeline_root.glob("*/detections.json"))
-    if not per_case:
-        raise FileNotFoundError(
-            f"No all_detections.json or per-case */detections.json files found under {pipeline_root}"
-        )
-    return [_read_json(path) for path in per_case]
+    out: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError(f"Detection record under {pipeline_root} is not an object: {record!r}")
+        copied = dict(record)
+        copied["_source_pipeline_root"] = str(pipeline_root.resolve())
+        out.append(copied)
+    return out
+
+
+def _load_detection_records_many(pipeline_roots: list[Path]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for pipeline_root in pipeline_roots:
+        for record in _load_detection_records(pipeline_root):
+            key = (str(record.get("case_id") or ""), str(record.get("wsi_path") or ""))
+            if key in seen:
+                raise ValueError(
+                    f"Duplicate detector record across input roots: case_id={key[0]!r} wsi_path={key[1]!r}"
+                )
+            seen.add(key)
+            records.append(record)
+    return records
+
+
+def _load_stage1_thumbnail_indices(pipeline_roots: list[Path]) -> dict[str, Path]:
+    index: dict[str, Path] = {}
+    for pipeline_root in pipeline_roots:
+        index.update(_load_stage1_thumbnail_index(pipeline_root))
+    return index
 
 
 def _case_sort_key(record: dict[str, Any]) -> tuple[str, str]:
@@ -255,6 +286,15 @@ def _resolve_thumbnail(record: dict[str, Any], pipeline_root: Path, stage1_index
     path_value = ((record.get("paths") or {}).get("thumbnail_path") if isinstance(record.get("paths"), dict) else "")
     if path_value:
         candidates.append(Path(str(path_value)))
+    source_pipeline_root = record.get("_source_pipeline_root")
+    if source_pipeline_root and case_id:
+        candidates.append(
+            Path(str(source_pipeline_root))
+            / case_id
+            / "intermediate_stage_artifacts"
+            / "stage1_thumbnail_detection"
+            / "thumbnail.png"
+        )
     if case_id in stage1_index:
         candidates.append(stage1_index[case_id])
     if case_id:
@@ -364,19 +404,22 @@ def _format_float(value: float) -> str:
 
 def _create_cases(
     records: list[dict[str, Any]],
-    pipeline_root: Path,
+    pipeline_roots: list[Path],
     output_dir: Path,
     image_mode: str,
     split_by_group: dict[str, str],
     group_strategy: str,
     overwrite: bool,
 ) -> list[CaseRecord]:
-    stage1_index = _load_stage1_thumbnail_index(pipeline_root)
+    if not pipeline_roots:
+        raise ValueError("At least one pipeline root is required")
+    default_pipeline_root = pipeline_roots[0]
+    stage1_index = _load_stage1_thumbnail_indices(pipeline_roots)
     cases: list[CaseRecord] = []
     used_names: set[str] = set()
     for record in sorted(records, key=_case_sort_key):
         case_id = str(record.get("case_id") or Path(str(record.get("wsi_path") or "case")).stem)
-        thumbnail = _resolve_thumbnail(record, pipeline_root, stage1_index)
+        thumbnail = _resolve_thumbnail(record, default_pipeline_root, stage1_index)
         with Image.open(thumbnail) as image:
             width, height = image.size
         stain = _derive_stain(record)
@@ -535,7 +578,7 @@ def _write_manifests(output_dir: Path, cases: list[CaseRecord]) -> None:
     _write_jsonl(output_dir / "manifests" / "manifest.jsonl", jsonl_rows)
 
 
-def _coco_for_cases(cases: list[CaseRecord], split_name: str, class_name: str) -> dict[str, Any]:
+def _coco_for_cases(cases: list[CaseRecord], split_name: str, class_name: str, ticket: str) -> dict[str, Any]:
     images: list[dict[str, Any]] = []
     annotations: list[dict[str, Any]] = []
     ann_id = 1
@@ -584,7 +627,7 @@ def _coco_for_cases(cases: list[CaseRecord], split_name: str, class_name: str) -
         "info": {
             "description": "Detector pipeline thumbnail bbox export",
             "version": EXPORT_VERSION,
-            "ticket": TICKET,
+            "ticket": ticket,
             "split": split_name,
         },
         "licenses": [],
@@ -594,11 +637,14 @@ def _coco_for_cases(cases: list[CaseRecord], split_name: str, class_name: str) -
     }
 
 
-def _write_coco(output_dir: Path, cases: list[CaseRecord], class_name: str) -> None:
+def _write_coco(output_dir: Path, cases: list[CaseRecord], class_name: str, ticket: str) -> None:
     by_split = {split: [case for case in cases if case.split == split] for split in ("train", "val", "test")}
     for split, split_cases in by_split.items():
-        _write_json(output_dir / "annotations" / f"instances_{split}.json", _coco_for_cases(split_cases, split, class_name))
-    _write_json(output_dir / "annotations" / "instances_all.json", _coco_for_cases(cases, "all", class_name))
+        _write_json(
+            output_dir / "annotations" / f"instances_{split}.json",
+            _coco_for_cases(split_cases, split, class_name, ticket),
+        )
+    _write_json(output_dir / "annotations" / "instances_all.json", _coco_for_cases(cases, "all", class_name, ticket))
 
 
 def _write_yolo(output_dir: Path, cases: list[CaseRecord], class_name: str) -> None:
@@ -635,17 +681,19 @@ def _box_counts(cases: list[CaseRecord]) -> dict[str, int]:
 
 def _write_summary(
     output_dir: Path,
-    pipeline_root: Path,
+    pipeline_roots: list[Path],
     cases: list[CaseRecord],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    source_roots = [str(root.resolve()) for root in pipeline_roots]
+    source_jsons = [str((root / "all_detections.json").resolve()) for root in pipeline_roots]
     summary = {
-        "ticket": TICKET,
+        "ticket": args.ticket,
         "export_version": EXPORT_VERSION,
         "git_commit": _repo_git_commit(),
-        "source_pipeline_root": str(pipeline_root.resolve()),
+        "source_pipeline_roots": source_roots,
         "output_dir": str(output_dir.resolve()),
-        "source_all_detections_json": str((pipeline_root / "all_detections.json").resolve()),
+        "source_all_detections_json": source_jsons,
         "image_mode": args.image_mode,
         "group_strategy": args.group_by,
         "split_fractions": {
@@ -672,23 +720,33 @@ def _write_summary(
             "cases_csv": str((output_dir / "manifests" / "cases.csv").resolve()),
         },
     }
+    if len(source_roots) == 1:
+        summary["source_pipeline_root"] = source_roots[0]
     _write_json(output_dir / "summary.json", summary)
     return summary
 
 
 def _write_reproduction(
     output_dir: Path,
-    pipeline_root: Path,
+    pipeline_roots: list[Path],
     summary: dict[str, Any],
     args: argparse.Namespace,
 ) -> None:
-    source_json = pipeline_root / "all_detections.json"
-    source_hash = _sha256(source_json) if source_json.is_file() else "missing"
+    source_lines = []
+    for pipeline_root in pipeline_roots:
+        source_json = pipeline_root / "all_detections.json"
+        source_hash = _sha256(source_json) if source_json.is_file() else "missing"
+        source_lines.append(
+            f"- root: {pipeline_root.resolve()}\n"
+            f"  all_detections_json: {source_json.resolve()}\n"
+            f"  all_detections_sha256: {source_hash}"
+        )
+    source_text = "\n".join(source_lines)
     text = f"""\
 Detector Training Dataset Export
 ================================
 
-Ticket: {TICKET}
+Ticket: {args.ticket}
 Export version: {EXPORT_VERSION}
 Git commit: {_repo_git_commit()}
 
@@ -696,10 +754,7 @@ Command:
 {_redacted_argv(sys.argv)}
 
 Source detector pipeline root:
-{pipeline_root.resolve()}
-
-Source all_detections.json sha256:
-{source_hash}
+{source_text}
 
 Output directory:
 {output_dir.resolve()}
@@ -726,32 +781,32 @@ Summary:
 
 
 def export_dataset(args: argparse.Namespace) -> dict[str, Any]:
-    pipeline_root = args.pipeline_output_root.resolve()
+    pipeline_roots = [path.resolve() for path in args.pipeline_output_roots]
     output_dir = args.output_dir.resolve()
-    records = _load_detection_records(pipeline_root)
+    records = _load_detection_records_many(pipeline_roots)
     records = sorted(records, key=_case_sort_key)
     group_ids = [_derive_group_id(record, args.group_by) for record in records]
     split_by_group = _split_group_ids(group_ids, args.split_fractions, args.seed)
     _prepare_output_dir(output_dir, args.overwrite)
     cases = _create_cases(
         records,
-        pipeline_root,
+        pipeline_roots,
         output_dir,
         args.image_mode,
         split_by_group,
         args.group_by,
         args.overwrite,
     )
-    _write_coco(output_dir, cases, args.class_name)
+    _write_coco(output_dir, cases, args.class_name, args.ticket)
     _write_yolo(output_dir, cases, args.class_name)
     _write_manifests(output_dir, cases)
-    summary = _write_summary(output_dir, pipeline_root, cases, args)
-    _write_reproduction(output_dir, pipeline_root, summary, args)
+    summary = _write_summary(output_dir, pipeline_roots, cases, args)
+    _write_reproduction(output_dir, pipeline_roots, summary, args)
     if not args.skip_validation:
         validation = validate_dataset(output_dir)
         summary["validation"] = validation
         _write_json(output_dir / "summary.json", summary)
-        _write_reproduction(output_dir, pipeline_root, summary, args)
+        _write_reproduction(output_dir, pipeline_roots, summary, args)
     return summary
 
 
@@ -844,9 +899,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    export = subparsers.add_parser("export", help="Export a detector pipeline output root.")
-    export.add_argument("pipeline_output_root", type=Path, help="Detector pipeline root with all_detections.json.")
+    export = subparsers.add_parser("export", help="Export one or more detector pipeline output roots.")
+    export.add_argument(
+        "pipeline_output_roots",
+        type=Path,
+        nargs="+",
+        help="Detector pipeline root(s) with all_detections.json or per-case detections.json files.",
+    )
     export.add_argument("--output-dir", type=Path, required=True, help="Destination dataset directory.")
+    export.add_argument("--ticket", default=DEFAULT_TICKET, help="Ticket/provenance id to record in outputs.")
     export.add_argument(
         "--image-mode",
         choices=("copy", "symlink"),

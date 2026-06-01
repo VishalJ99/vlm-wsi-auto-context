@@ -22,6 +22,7 @@ import yaml
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+DEFAULT_TICKET = "PER-248"
 
 
 @dataclass(frozen=True)
@@ -564,10 +565,10 @@ def write_reproduction(
     best_weights: Path,
 ) -> None:
     command = " ".join(_shell_quote(part) for part in sys.argv)
-    text = f"""# PER-241 Ultralytics YOLO Detector Distillation
+    text = f"""# {args.ticket} Ultralytics YOLO Detector Distillation
 
 Created: {_now_iso()}
-Ticket: PER-241
+Ticket: {args.ticket}
 Repository: {_repo_root()}
 Git commit: {env.get("git_commit", "unknown")}
 
@@ -659,6 +660,23 @@ def yolo_augmentation_kwargs(profile: str) -> dict[str, float]:
     raise ValueError(f"Unknown augmentation profile: {profile}")
 
 
+def yolo_hyperparameter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Return optional Ultralytics train kwargs for coarse detector tuning."""
+    kwargs: dict[str, Any] = {}
+    for arg_name, train_name in (
+        ("optimizer", "optimizer"),
+        ("lr0", "lr0"),
+        ("lrf", "lrf"),
+        ("weight_decay", "weight_decay"),
+    ):
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            kwargs[train_name] = value
+    if getattr(args, "cos_lr", False):
+        kwargs["cos_lr"] = True
+    return kwargs
+
+
 def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
     dataset_dir = Path(args.dataset_dir).resolve()
     output_root = Path(args.output_root).resolve()
@@ -690,6 +708,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
     dataset_yaml = dataset_dir / "dataset.yaml"
     model = YOLO(args.model)
     augmentation_kwargs = yolo_augmentation_kwargs(args.augment_profile)
+    hyperparameter_kwargs = yolo_hyperparameter_kwargs(args)
     train_results = model.train(
         data=str(dataset_yaml),
         epochs=args.epochs,
@@ -707,6 +726,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
         plots=True,
         verbose=True,
         **augmentation_kwargs,
+        **hyperparameter_kwargs,
     )
     train_dir = Path(getattr(model.trainer, "save_dir", output_root / "ultralytics" / "train"))
     if not train_dir.exists() and hasattr(train_results, "save_dir"):
@@ -787,7 +807,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
     env = collect_environment()
     metrics_summary = {
         "created_at": _now_iso(),
-        "ticket": "PER-241",
+        "ticket": args.ticket,
         "dataset_dir": str(dataset_dir),
         "output_root": str(output_root),
         "model": args.model,
@@ -795,6 +815,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "imgsz": args.imgsz,
         "augment_profile": args.augment_profile,
         "augmentation_kwargs": augmentation_kwargs,
+        "hyperparameter_kwargs": hyperparameter_kwargs,
         "batch": args.batch,
         "device": args.device,
         "eval_split": args.eval_split,
@@ -887,6 +908,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dataset-dir", required=True, help="Detector training dataset export root.")
     parser.add_argument("--output-root", required=True, help="Output root for this YOLO run.")
+    parser.add_argument("--ticket", default=DEFAULT_TICKET, help="Ticket/provenance id to record in outputs.")
     parser.add_argument("--model", default="yolov8n.pt", help="Ultralytics model or YAML, e.g. yolov8n.pt.")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--imgsz", type=int, default=1024)
@@ -905,6 +927,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--seed", type=int, default=13)
+    parser.add_argument(
+        "--optimizer",
+        choices=("SGD", "Adam", "AdamW", "NAdam", "RAdam", "RMSProp", "auto"),
+        default=None,
+        help="Optional Ultralytics optimizer override. Omit to keep Ultralytics defaults.",
+    )
+    parser.add_argument("--lr0", type=float, default=None, help="Optional initial learning-rate override.")
+    parser.add_argument("--lrf", type=float, default=None, help="Optional final LR fraction override.")
+    parser.add_argument("--weight-decay", type=float, default=None, help="Optional weight decay override.")
+    parser.add_argument("--cos-lr", action="store_true", help="Use Ultralytics cosine LR scheduling.")
     parser.add_argument("--cache", action="store_true", help="Enable Ultralytics image caching.")
     parser.add_argument("--eval-split", default="test", choices=("train", "val", "test"))
     parser.add_argument("--conf", type=float, default=0.10, help="Prediction confidence for project metrics.")

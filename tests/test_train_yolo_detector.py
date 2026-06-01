@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -79,3 +80,29 @@ def test_yolo_augmentation_profiles_are_explicit() -> None:
     stain = yolo.yolo_augmentation_kwargs("stain-jitter")
     assert stain["hsv_s"] > reduced["hsv_s"]
     assert stain["mosaic"] > reduced["mosaic"]
+
+
+def test_yolo_hyperparameter_kwargs_only_passes_overrides() -> None:
+    defaults = argparse.Namespace(
+        optimizer=None,
+        lr0=None,
+        lrf=None,
+        weight_decay=None,
+        cos_lr=False,
+    )
+    assert yolo.yolo_hyperparameter_kwargs(defaults) == {}
+
+    tuned = argparse.Namespace(
+        optimizer="AdamW",
+        lr0=0.001,
+        lrf=0.1,
+        weight_decay=0.0005,
+        cos_lr=True,
+    )
+    assert yolo.yolo_hyperparameter_kwargs(tuned) == {
+        "optimizer": "AdamW",
+        "lr0": 0.001,
+        "lrf": 0.1,
+        "weight_decay": 0.0005,
+        "cos_lr": True,
+    }

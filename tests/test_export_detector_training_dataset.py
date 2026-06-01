@@ -68,8 +68,9 @@ def test_export_dataset_writes_coco_yolo_and_group_safe_manifests(tmp_path: Path
 
     output_dir = tmp_path / "dataset"
     args = argparse.Namespace(
-        pipeline_output_root=pipeline_root,
+        pipeline_output_roots=[pipeline_root],
         output_dir=output_dir,
+        ticket="PER-248",
         image_mode="copy",
         group_by="auto",
         split_fractions=(0.5, 0.25, 0.25),
@@ -83,6 +84,8 @@ def test_export_dataset_writes_coco_yolo_and_group_safe_manifests(tmp_path: Path
     assert summary["case_count"] == 8
     assert summary["box_count"] == 8
     assert summary["group_count"] == 4
+    assert summary["ticket"] == "PER-248"
+    assert summary["source_pipeline_roots"] == [str(pipeline_root.resolve())]
     assert (output_dir / "annotations" / "instances_all.json").is_file()
     assert (output_dir / "dataset.yaml").is_file()
     assert (output_dir / "validation.json").is_file()
@@ -104,3 +107,47 @@ def test_export_dataset_writes_coco_yolo_and_group_safe_manifests(tmp_path: Path
     label_paths = sorted((output_dir / "labels").glob("*/*.txt"))
     assert len(label_paths) == 8
     assert label_paths[0].read_text().strip() == "0 0.35 0.2 0.3 0.2"
+
+
+def test_export_dataset_accepts_multiple_pipeline_roots(tmp_path: Path) -> None:
+    evg_root = tmp_path / "pipeline_evg"
+    sv40_root = tmp_path / "pipeline_sv40"
+    evg_record = _write_tiny_pipeline_case(
+        evg_root,
+        "evg_patient_001_slide_001",
+        "/data2/example/EVG/evg_patient_001_slide_001.svs",
+    )
+    sv40_record = _write_tiny_pipeline_case(
+        sv40_root,
+        "sv40_patient_001_slide_001",
+        "/data2/example/SV40/sv40_patient_001_slide_001.svs",
+    )
+    (evg_root / "all_detections.json").write_text(json.dumps([evg_record]))
+    (sv40_root / "all_detections.json").write_text(json.dumps([sv40_record]))
+
+    output_dir = tmp_path / "dataset"
+    args = argparse.Namespace(
+        pipeline_output_roots=[evg_root, sv40_root],
+        output_dir=output_dir,
+        ticket="PER-248",
+        image_mode="copy",
+        group_by="case",
+        split_fractions=(1.0, 0.0, 0.0),
+        seed=13,
+        class_name="tissue_candidate",
+        overwrite=True,
+        skip_validation=False,
+    )
+
+    summary = exporter.export_dataset(args)
+
+    assert summary["case_count"] == 2
+    assert summary["box_count"] == 2
+    assert summary["source_pipeline_roots"] == [str(evg_root.resolve()), str(sv40_root.resolve())]
+    assert summary["validation"]["status"] == "ok"
+    coco = json.loads((output_dir / "annotations" / "instances_all.json").read_text())
+    assert coco["info"]["ticket"] == "PER-248"
+    assert sorted(image["case_id"] for image in coco["images"]) == [
+        "evg_patient_001_slide_001",
+        "sv40_patient_001_slide_001",
+    ]
