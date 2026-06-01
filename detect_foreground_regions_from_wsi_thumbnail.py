@@ -186,6 +186,23 @@ def bbox_overlap_min_area(a: Tuple, b: Tuple) -> float:
     return inter_area / min_area
 
 
+def bbox_coords_from_item(item: dict) -> Optional[List]:
+    """Extract bbox coordinates, including common VLM key drift like Box_2."""
+    for key in ("box_2d", "bbox_2d", "bbox"):
+        value = item.get(key)
+        if isinstance(value, list) and len(value) == 4:
+            return value
+    for key, value in item.items():
+        normalized_key = re.sub(r"\s+", "", str(key)).lower()
+        if not isinstance(value, list) or len(value) != 4:
+            continue
+        if re.fullmatch(r"(?:bbox|box)(?:[_-]?\d+)?", normalized_key):
+            return value
+        if re.fullmatch(r".*(?:bbox|box)[_-]?\d+", normalized_key):
+            return value
+    return None
+
+
 def is_giant_bbox(bboxes: List, threshold: float = 0.8) -> bool:
     """
     Check if single bbox covers >threshold of normalized 0-1000 space.
@@ -199,7 +216,7 @@ def is_giant_bbox(bboxes: List, threshold: float = 0.8) -> bool:
     bbox = bboxes[0]
     # Extract coords (handle dict or list format)
     if isinstance(bbox, dict):
-        coords = bbox.get("box_2d") or bbox.get("bbox_2d") or bbox.get("bbox")
+        coords = bbox_coords_from_item(bbox)
     else:
         coords = bbox
 
@@ -852,8 +869,8 @@ def parse_bboxes_response(response_text: str, coord_order: str = "yxxy") -> Opti
             if not isinstance(item, dict):
                 continue
 
-            # Extract coordinates (support multiple key variants)
-            bbox = item.get("bbox_2d") or item.get("box_2d") or item.get("bbox")
+            # Extract coordinates (support multiple key variants and mild key drift)
+            bbox = bbox_coords_from_item(item)
             if not bbox or not isinstance(bbox, list) or len(bbox) != 4:
                 continue
 
@@ -1077,7 +1094,7 @@ def draw_bboxes_on_pil(img: Image.Image, bboxes: List, colors: Optional[List[str
     for i, bbox_item in enumerate(bboxes):
         # Handle multiple formats
         if isinstance(bbox_item, dict):
-            bbox = bbox_item.get("box_2d") or bbox_item.get("bbox_2d") or bbox_item.get("bbox")
+            bbox = bbox_coords_from_item(bbox_item)
         elif isinstance(bbox_item, (list, tuple)):
             bbox = bbox_item
         else:
@@ -1287,7 +1304,7 @@ def run_orientation_tta(
                     # Transform to 0° space
                     for bbox_item in bboxes_parsed:
                         if isinstance(bbox_item, dict):
-                            bbox = bbox_item.get("box_2d") or bbox_item.get("bbox_2d") or bbox_item.get("bbox")
+                            bbox = bbox_coords_from_item(bbox_item)
                         else:
                             bbox = bbox_item
                         if bbox and len(bbox) == 4:

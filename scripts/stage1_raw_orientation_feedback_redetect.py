@@ -205,6 +205,12 @@ def _detection_coords(item: dict[str, Any]) -> Any:
         normalized_key = re.sub(r"\s+", "", str(key)).lower()
         if normalized_key in {"box_2d", "bbox_2d", "bbox"}:
             return value
+        if not isinstance(value, list) or len(value) != 4:
+            continue
+        if re.fullmatch(r"(?:bbox|box)(?:[_-]?\d+)?", normalized_key):
+            return value
+        if re.fullmatch(r".*(?:bbox|box)[_-]?\d+", normalized_key):
+            return value
     return None
 
 
