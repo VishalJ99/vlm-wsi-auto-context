@@ -96,6 +96,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-size", type=int, default=None)
     parser.add_argument("--wsi-reader", choices=["cucim", "openslide"], default="cucim")
     parser.add_argument("--read-workers", type=int, default=16)
+    parser.add_argument("--pipeline-mode", choices=["serial", "prefetch"], default="prefetch")
+    parser.add_argument("--prefetch-queue-batches", type=int, default=4)
     parser.add_argument("--max-overview-width", type=int, default=1240)
     parser.add_argument("--max-grid-dim", type=int, default=520)
     parser.add_argument("--sample-seed", type=int, default=270)
@@ -563,6 +565,10 @@ def write_reproduction(args: argparse.Namespace, summary: dict[str, Any]) -> Pat
         str(args.wsi_reader),
         "--read-workers",
         str(args.read_workers),
+        "--pipeline-mode",
+        str(args.pipeline_mode),
+        "--prefetch-queue-batches",
+        str(args.prefetch_queue_batches),
         "--batch-size",
         str(args.batch_size),
         "--sample-seed",
@@ -603,6 +609,7 @@ def write_reproduction(args: argparse.Namespace, summary: dict[str, Any]) -> Pat
             "Reconstruct scale500_logreg from selected scale500 Stage 7 pseudo-label DINOv3-small features.",
             "Score only 512px level-0 patches inside unselected final detector bboxes.",
             f"cuCIM/OpenSlide reader setting: {args.wsi_reader}; read_workers={args.read_workers}; batch_size={args.batch_size}.",
+            f"Patch extraction pipeline mode: {args.pipeline_mode}; prefetch_queue_batches={args.prefetch_queue_batches}.",
             "",
             "Interpretation boundary:",
             "Scale500 has no GT labels in this packet. Outputs are visual transfer comparison and FG-fraction summaries only.",
@@ -645,6 +652,8 @@ def main() -> None:
     if args.model_name is None:
         args.model_name = model_name
     extractor = FeatureExtractor(args)
+    extractor.pipeline_mode = args.pipeline_mode
+    extractor.prefetch_queue_batches = int(args.prefetch_queue_batches)
     if extractor.backend != backend or extractor.model_name != model_name:
         raise ValueError(
             "Feature extractor model does not match cached training features: "
@@ -758,6 +767,8 @@ def main() -> None:
         "feature_model": model_name,
         "feature_extractor": extractor.meta,
         "patch_reader": {"wsi_reader": args.wsi_reader, "read_workers": int(args.read_workers)},
+        "pipeline_mode": args.pipeline_mode,
+        "prefetch_queue_batches": int(args.prefetch_queue_batches),
         "package_versions": package_versions(),
         "case_selection_manifest_csv": str((args.output_dir / "case_selection_manifest.csv").resolve()),
         "model_training_summary_csv": str((args.output_dir / "model_training_summary.csv").resolve()),

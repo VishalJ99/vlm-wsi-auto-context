@@ -8,10 +8,13 @@ import ast
 import csv
 import json
 import math
+import queue
 import shlex
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -424,24 +427,63 @@ def extract_unselected_features(
                     "model_name": extractor.model_name,
                     "wsi_reader": str(data["wsi_reader"]) if "wsi_reader" in data.files else "missing",
                     "read_workers": int(data["read_workers"]) if "read_workers" in data.files else -1,
+                    "pipeline_mode": str(data["pipeline_mode"]) if "pipeline_mode" in data.files else "missing",
+                    "extract_seconds": 0.0,
+                    "patches_per_second": 0.0,
                 }
                 return data["features"].astype("float32"), loaded_records, meta
 
+    started = time.perf_counter()
     features: list[np.ndarray] = []
-    batch_images: list[Image.Image] = []
 
-    def flush() -> None:
-        nonlocal batch_images
-        if not batch_images:
+    def infer_images(images: list[Image.Image]) -> None:
+        if not images:
             return
-        features.extend(list(extractor.extract_batch(batch_images)))
-        batch_images = []
+        features.extend(list(extractor.extract_batch(images)))
 
-    for record in records:
-        batch_images.append(read_patch(slide, record))
-        if len(batch_images) >= extractor.batch_size:
-            flush()
-    flush()
+    pipeline_mode = str(getattr(extractor, "pipeline_mode", "serial"))
+    prefetch_queue_batches = int(getattr(extractor, "prefetch_queue_batches", 4))
+    if pipeline_mode == "prefetch":
+        batches: queue.Queue[list[Image.Image] | Exception | None] = queue.Queue(
+            maxsize=max(1, prefetch_queue_batches)
+        )
+
+        def producer() -> None:
+            try:
+                images: list[Image.Image] = []
+                for record in records:
+                    images.append(read_patch(slide, record))
+                    if len(images) >= extractor.batch_size:
+                        batches.put(images)
+                        images = []
+                if images:
+                    batches.put(images)
+            except Exception as exc:
+                batches.put(exc)
+            finally:
+                batches.put(None)
+
+        thread = threading.Thread(target=producer, name="unselected-feature-prefetch", daemon=True)
+        thread.start()
+        while True:
+            item = batches.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                thread.join(timeout=5)
+                raise item
+            infer_images(item)
+        thread.join()
+    else:
+        batch_images: list[Image.Image] = []
+        for record in records:
+            batch_images.append(read_patch(slide, record))
+            if len(batch_images) >= extractor.batch_size:
+                infer_images(batch_images)
+                batch_images = []
+        infer_images(batch_images)
+
+    elapsed = time.perf_counter() - started
     feature_array = np.stack(features, axis=0).astype("float32")
     wsi_reader = getattr(slide, "backend", "openslide")
     read_workers = int(getattr(slide, "read_workers", 0))
@@ -461,6 +503,7 @@ def extract_unselected_features(
         model_name=np.asarray(extractor.model_name),
         wsi_reader=np.asarray(wsi_reader),
         read_workers=np.asarray(read_workers),
+        pipeline_mode=np.asarray(pipeline_mode),
         created_at=np.asarray(datetime.now(timezone.utc).isoformat()),
     )
     meta = {
@@ -470,6 +513,9 @@ def extract_unselected_features(
         "model_name": extractor.model_name,
         "wsi_reader": wsi_reader,
         "read_workers": read_workers,
+        "pipeline_mode": pipeline_mode,
+        "extract_seconds": float(elapsed),
+        "patches_per_second": float(len(records) / elapsed) if elapsed > 0 else 0.0,
     }
     return feature_array, records, meta
 
