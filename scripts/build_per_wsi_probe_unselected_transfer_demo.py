@@ -372,9 +372,11 @@ class WsiPatchReader:
             )
             arr = np.asarray(region)
             if arr.ndim == 2:
-                return Image.fromarray(arr).convert("RGB")
-            return Image.fromarray(arr[:, :, :3]).convert("RGB")
-        return self.slide.read_region((record.x, record.y), 0, (record.width, record.height)).convert("RGB")
+                return pad_patch_to_square(Image.fromarray(arr).convert("RGB"))
+            return pad_patch_to_square(Image.fromarray(arr[:, :, :3]).convert("RGB"))
+        return pad_patch_to_square(
+            self.slide.read_region((record.x, record.y), 0, (record.width, record.height)).convert("RGB")
+        )
 
     def close(self) -> None:
         close = getattr(self.slide, "close", None)
@@ -385,7 +387,20 @@ class WsiPatchReader:
 def read_patch(slide: Any, record: PatchRecord) -> Image.Image:
     if hasattr(slide, "read_patch"):
         return slide.read_patch(record)
-    return slide.read_region((record.x, record.y), 0, (record.width, record.height)).convert("RGB")
+    return pad_patch_to_square(
+        slide.read_region((record.x, record.y), 0, (record.width, record.height)).convert("RGB")
+    )
+
+
+def pad_patch_to_square(image: Image.Image, *, fill: tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
+    """Keep clipped bbox-edge cells square for DINO while preserving bbox-only scoring."""
+    image = image.convert("RGB")
+    if image.width == image.height:
+        return image
+    side = max(image.width, image.height)
+    canvas = Image.new("RGB", (side, side), fill)
+    canvas.paste(image, (0, 0))
+    return canvas
 
 
 def extract_unselected_features(
@@ -397,7 +412,12 @@ def extract_unselected_features(
 ) -> tuple[np.ndarray, list[PatchRecord], dict[str, Any]]:
     if resume and cache_path.exists():
         with np.load(cache_path, allow_pickle=False) as data:
-            if str(data["model_backend"]) == extractor.backend and str(data["model_name"]) == extractor.model_name:
+            patch_padding = str(data["patch_padding"]) if "patch_padding" in data.files else "missing"
+            if (
+                str(data["model_backend"]) == extractor.backend
+                and str(data["model_name"]) == extractor.model_name
+                and patch_padding == "white_square"
+            ):
                 loaded_records = [
                     PatchRecord(
                         candidate_order=int(order),
@@ -428,6 +448,7 @@ def extract_unselected_features(
                     "wsi_reader": str(data["wsi_reader"]) if "wsi_reader" in data.files else "missing",
                     "read_workers": int(data["read_workers"]) if "read_workers" in data.files else -1,
                     "pipeline_mode": str(data["pipeline_mode"]) if "pipeline_mode" in data.files else "missing",
+                    "patch_padding": patch_padding,
                     "extract_seconds": 0.0,
                     "patches_per_second": 0.0,
                 }
@@ -504,6 +525,7 @@ def extract_unselected_features(
         wsi_reader=np.asarray(wsi_reader),
         read_workers=np.asarray(read_workers),
         pipeline_mode=np.asarray(pipeline_mode),
+        patch_padding=np.asarray("white_square"),
         created_at=np.asarray(datetime.now(timezone.utc).isoformat()),
     )
     meta = {
@@ -514,6 +536,7 @@ def extract_unselected_features(
         "wsi_reader": wsi_reader,
         "read_workers": read_workers,
         "pipeline_mode": pipeline_mode,
+        "patch_padding": "white_square",
         "extract_seconds": float(elapsed),
         "patches_per_second": float(len(records) / elapsed) if elapsed > 0 else 0.0,
     }
