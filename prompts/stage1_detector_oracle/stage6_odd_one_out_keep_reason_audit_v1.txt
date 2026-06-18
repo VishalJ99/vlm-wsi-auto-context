@@ -1,0 +1,45 @@
+Audit this text review of candidate crops.
+
+Input:
+- consensus: the shared appearance of the main crop group
+- crops: per-crop label and reason
+- flagged_artifacts: crops already removed by the review
+
+Task:
+Find kept crops whose reason suggests they were accepted only because a small
+or incidental part matched the consensus.
+
+Mark a kept crop as "suspect_false_keep" if its reason uses language like:
+- small fragment
+- tiny region
+- small corner/edge/peripheral area
+- contains some matching tissue
+- faint/low-contrast fragment
+and does not clearly say the main region of the crop matches the consensus.
+
+Do not mark a kept crop suspect if the reason says the crop shows the main
+consensus pattern, a large tissue core, clear shared architecture, or is
+broadly consistent with the consensus.
+
+Do not change crops already listed in flagged_artifacts unless the text is
+internally contradictory.
+
+Use only the written reasons. Do not infer visual facts that are not stated.
+
+Return JSON only:
+{
+  "audit_status": "ok|manual_review",
+  "suspect_false_keeps": [ids],
+  "upheld_keeps": [ids],
+  "upheld_removals": [ids],
+  "manual_review": [ids],
+  "recommended_flagged_artifacts": [ids],
+  "crops": [
+    {
+      "id": N,
+      "audit_label": "suspect_false_keep|uphold_keep|uphold_remove|manual_review",
+      "evidence": "short text-only reason"
+    }
+  ],
+  "summary": "short summary"
+}

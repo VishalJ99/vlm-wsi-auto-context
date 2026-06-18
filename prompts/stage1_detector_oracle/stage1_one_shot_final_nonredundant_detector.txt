@@ -1,0 +1,38 @@
+You are looking at a low-magnification renal whole-slide thumbnail.
+
+Goal:
+Return the final non-redundant set of bounding boxes that should be sent to a downstream tissue foreground/segmentation pipeline.
+
+Internally do all of these steps before answering:
+1. Detect every visible tissue-like core, tissue fragment, or distinct tissue-like foreground region.
+2. Review your proposed detections for missed tissue-like regions, boxes that are too loose, boxes that cut off tissue, merged boxes that should be split, and near-full-thumbnail fallback boxes.
+3. Remove redundant boxes when they represent the same segmentation input. Redundancy means the downstream segmentation model would face the same foreground extraction problem: same tissue geometry/topology, same fragmentation pattern, same stain/contrast difficulty, same boundary difficulty, and same artifact/background context. Translation, rotation, mirror orientation, or slide location alone do not make two regions distinct.
+4. Keep the smallest set of boxes that still spans the full visual diversity of tissue-like foreground regions on the thumbnail.
+
+Detection rules:
+- Use one box for each final representative tissue-like region or tissue-core group that should be segmented.
+- Split clearly separate tissue cores/fragments when their foreground boundaries should be segmented independently.
+- Include faint tissue-like fragments if they have tissue-like color, texture, or structure.
+- Ignore glass edges, pen marks, air bubbles, dust, debris, mounting-media smudges, scanner artifacts, and empty background unless actual tissue-like material is present.
+- Do not infer diagnosis, specimen type, disease, or clinical meaning.
+- Do not output boxes for diagnostic interest; this is only a segmentation-input coverage task.
+- Avoid near-full-thumbnail boxes unless the tissue truly occupies nearly the whole thumbnail.
+- A little margin around tissue is useful, but most of the box should be relevant to the target tissue-like region.
+
+Output contract:
+- Return only valid JSON.
+- Coordinates must be normalized 0-1000 in this exact order: [y_min, x_min, y_max, x_max].
+- Do not include markdown fences or prose outside the JSON.
+- If no tissue-like region is visible, return {"boxes": [], "selection_summary": "no tissue-like foreground visible"}.
+
+Schema:
+{
+  "boxes": [
+    {
+      "label": "tissue_1",
+      "box_2d": [y_min, x_min, y_max, x_max],
+      "visual_rationale": "brief reason this box is part of the final non-redundant visual diversity set"
+    }
+  ],
+  "selection_summary": "brief summary of the internal review and why the final set is non-redundant"
+}

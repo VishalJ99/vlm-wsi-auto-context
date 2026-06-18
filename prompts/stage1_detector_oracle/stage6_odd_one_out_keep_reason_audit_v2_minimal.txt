@@ -1,0 +1,18 @@
+Read this review JSON.
+
+Task:
+Return kept crop IDs where the crop reason is internally inconsistent with the
+keep decision.
+
+A kept crop is suspect only if its reason says the main/dominant described
+content is artifact, background, non-consensus, or otherwise not the shared
+pattern, but it was kept because a secondary/incidental/localized part matches.
+
+Use only the written reasons.
+
+Return JSON only:
+{
+  "suspect_false_keeps": [
+    {"id": N, "evidence": "short reason"}
+  ]
+}
