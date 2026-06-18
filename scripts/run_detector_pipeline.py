@@ -53,6 +53,7 @@ from detector_pipeline_utils import (
     write_csv as _write_csv,
     write_json as _write_json,
     write_jsonl as _write_jsonl,
+    yxyx_overlap_metrics as _yxyx_overlap_metrics,
 )
 from utils.wsi_backend import close_wsi, get_pyramid_info, load_wsi
 
@@ -230,9 +231,11 @@ def _stage_contract(args: argparse.Namespace) -> list[dict[str, Any]]:
         if args.skip_stage2_review
         else (
             "Runs only for cases with a positive selected Stage 2b trigger. "
-            "Positive cases get new thumbnail detections from the Stage 3 "
-            "wrapper prompt; negative cases keep the Stage 1 raw boxes unless "
-            "--force-stage3-redetect is set."
+            "Positive cases retain all Stage 1 boxes. Each Stage 3 box is "
+            f"merged into an existing box if IoU >= {args.stage3_additive_merge_iou_threshold:.2f} "
+            "or intersection/area(stage3_box) >= "
+            f"{args.stage3_additive_stage3_coverage_threshold:.2f}; otherwise it is added. "
+            "Negative cases keep the Stage 1 raw boxes unless --force-stage3-redetect is set."
         )
     )
     stage4_output = (
@@ -745,6 +748,63 @@ def _stage2_second_prompt(
     )
 
 
+def _stage3_additive_boxes(
+    stage1_boxes: list[list[float]],
+    stage3_boxes: list[list[float]],
+    iou_threshold: float,
+    stage3_coverage_threshold: float,
+) -> tuple[list[list[float]], dict[str, int]]:
+    combined = [[float(value) for value in box] for box in stage1_boxes]
+    counts = {
+        "stage1_retained": len(combined),
+        "stage3_added": 0,
+        "stage3_merged": 0,
+        "stage3_merged_iou": 0,
+        "stage3_merged_existing_coverage": 0,
+    }
+    for box in stage3_boxes:
+        candidate = [float(value) for value in box]
+        match_idx: int | None = None
+        match_reason = ""
+        best_iou = -1.0
+        for idx, existing in enumerate(combined):
+            iou, _overlap_over_smaller = _yxyx_overlap_metrics(candidate, existing)
+            if iou >= iou_threshold and iou > best_iou:
+                match_idx = idx
+                match_reason = "iou"
+                best_iou = iou
+        if match_idx is None:
+            best_coverage = -1.0
+            candidate_area = max(0.0, candidate[2] - candidate[0]) * max(0.0, candidate[3] - candidate[1])
+            for idx, existing in enumerate(combined):
+                inter_y1, inter_x1 = max(candidate[0], existing[0]), max(candidate[1], existing[1])
+                inter_y2, inter_x2 = min(candidate[2], existing[2]), min(candidate[3], existing[3])
+                inter_area = max(0.0, inter_y2 - inter_y1) * max(0.0, inter_x2 - inter_x1)
+                stage3_coverage = inter_area / candidate_area if candidate_area > 0 else 0.0
+                if stage3_coverage >= stage3_coverage_threshold and stage3_coverage > best_coverage:
+                    match_idx = idx
+                    match_reason = "existing_coverage"
+                    best_coverage = stage3_coverage
+
+        if match_idx is not None:
+            existing = combined[match_idx]
+            combined[match_idx] = [
+                min(existing[0], candidate[0]),
+                min(existing[1], candidate[1]),
+                max(existing[2], candidate[2]),
+                max(existing[3], candidate[3]),
+            ]
+            counts["stage3_merged"] += 1
+            if match_reason == "iou":
+                counts["stage3_merged_iou"] += 1
+            else:
+                counts["stage3_merged_existing_coverage"] += 1
+        else:
+            combined.append(candidate)
+            counts["stage3_added"] += 1
+    return combined, counts
+
+
 def _run_stage2a_case(
     case: dict[str, Any],
     prompt: str,
@@ -1251,19 +1311,35 @@ def _run_stage3_case(
             }
         )
 
+    stage1_boxes = [
+        [float(value) for value in box]
+        for box in case.get("stage1_source_boxes_yxyx_normalized", case.get("source_boxes_yxyx_normalized", []))
+    ]
+    stage3_boxes: list[list[float]] = []
+    stage3_additive_counts = {
+        "stage1_retained": len(stage1_boxes),
+        "stage3_added": 0,
+        "stage3_merged": 0,
+        "stage3_merged_iou": 0,
+        "stage3_merged_existing_coverage": 0,
+    }
+
     if record.get("ran") and not record.get("error"):
-        boxes = [
+        stage3_boxes = [
             [float(value) for value in det.get("box_2d_yxyx_normalized", [])]
             for det in record.get("detections", [])
             if det.get("box_2d_yxyx_normalized")
         ]
-        active_stage = "stage3_feedback_redetection"
+        boxes, stage3_additive_counts = _stage3_additive_boxes(
+            stage1_boxes,
+            stage3_boxes,
+            args.stage3_additive_merge_iou_threshold,
+            args.stage3_additive_stage3_coverage_threshold,
+        )
+        active_stage = "stage1_plus_stage3_feedback_redetection"
         active_overlay = record.get("stage3_overlay_path", "")
     else:
-        boxes = [
-            [float(value) for value in box]
-            for box in case.get("stage1_source_boxes_yxyx_normalized", case.get("source_boxes_yxyx_normalized", []))
-        ]
+        boxes = stage1_boxes
         active_stage = case.get("stage1_source_stage", "stage1_raw")
         active_overlay = case.get("source_detector_overlay_path", "")
         if record.get("ran") and record.get("error"):
@@ -1280,7 +1356,9 @@ def _run_stage3_case(
             "stage3_redetect_ran": bool(record.get("ran", False)),
             "stage3_redetect_error": record.get("error", ""),
             "stage3_detection_count": int(record.get("stage3_detection_count") or 0),
-            "stage3_boxes_yxyx_normalized": boxes if record.get("ran") and not record.get("error") else [],
+            "stage3_boxes_yxyx_normalized": stage3_boxes if record.get("ran") and not record.get("error") else [],
+            "stage3_additive_policy": "retain_stage1_merge_covered_stage3_else_add",
+            "stage3_additive_counts": stage3_additive_counts,
             "stage3_overlay_path": record.get("stage3_overlay_path", ""),
             "active_source_stage": active_stage,
             "active_detector_overlay_path": active_overlay,
@@ -2255,6 +2333,8 @@ Key parameters:
 - Stage 3 reasoning effort: {args.stage3_reasoning_effort}
 - Stage 3 max tokens: {args.stage3_max_tokens}
 - Force Stage 3 redetect: {bool(args.force_stage3_redetect)}
+- Stage 3 additive merge IoU threshold: {args.stage3_additive_merge_iou_threshold}
+- Stage 3 additive existing-coverage threshold: intersection / area(stage3_box) >= {args.stage3_additive_stage3_coverage_threshold}
 - Stage 4 merge IoU threshold: {args.merge_iou_threshold}
 - Stage 4 overlap-over-smaller threshold: {args.containment_overlap_threshold}
 - Stage 4 padding fraction for crop-redetect context: {args.post_stage3_padding_frac}
@@ -2884,6 +2964,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage2a-reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--stage2b-reasoning-effort", default="low", choices=["low", "medium", "high"])
     parser.add_argument("--stage3-reasoning-effort", default="high", choices=["low", "medium", "high"])
+    parser.add_argument(
+        "--stage3-additive-merge-iou-threshold",
+        type=float,
+        default=0.75,
+        help="Merge a Stage 3 box into an existing active box when IoU is at least this value.",
+    )
+    parser.add_argument(
+        "--stage3-additive-stage3-coverage-threshold",
+        type=float,
+        default=0.80,
+        help=(
+            "Merge a Stage 3 box into an existing active box when intersection area divided by "
+            "the Stage 3 box area is at least this value."
+        ),
+    )
     parser.add_argument("--crop-redetect-reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--classification-reasoning-effort", default="high", choices=["low", "medium", "high"])
     parser.add_argument("--odd-one-out-reasoning-effort", default="high", choices=["low", "medium", "high"])

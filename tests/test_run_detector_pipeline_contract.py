@@ -80,3 +80,30 @@ def test_stage2b_selection_exposes_missed_tissue_alias() -> None:
     assert selected["stage2b_trigger_non_minor_detection_failure"] is True
     assert selected["stage2b_missed_tissue_trigger"] is True
     assert selected["stage3_redetect_triggered"] is True
+
+
+def test_stage3_additive_boxes_merge_covered_stage3_else_add() -> None:
+    stage1_boxes = [
+        [10.0, 10.0, 100.0, 100.0],
+        [200.0, 200.0, 260.0, 260.0],
+    ]
+    stage3_boxes = [
+        [12.0, 12.0, 98.0, 98.0],
+        [205.0, 205.0, 255.0, 265.0],
+        [400.0, 400.0, 450.0, 450.0],
+    ]
+
+    combined, counts = pipeline._stage3_additive_boxes(stage1_boxes, stage3_boxes, 0.75, 0.80)
+
+    assert combined == [
+        [10.0, 10.0, 100.0, 100.0],
+        [200.0, 200.0, 260.0, 265.0],
+        [400.0, 400.0, 450.0, 450.0],
+    ]
+    assert counts == {
+        "stage1_retained": 2,
+        "stage3_added": 1,
+        "stage3_merged": 2,
+        "stage3_merged_iou": 1,
+        "stage3_merged_existing_coverage": 1,
+    }
