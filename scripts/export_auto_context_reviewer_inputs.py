@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-dim",
         type=int,
-        default=2048,
+        default=1024,
         help="Maximum long edge for exported reviewer crop/overlay.",
     )
     parser.add_argument(

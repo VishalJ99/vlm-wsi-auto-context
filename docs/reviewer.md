@@ -127,7 +127,7 @@ review. Export reviewer inputs from the final Stage 7 patch-grid mask instead:
 python scripts/export_auto_context_reviewer_inputs.py \
   --run-dir runs/auto_context_pilot/<case>/<run_id> \
   --output-root runs/auto_context_reviewer_inputs \
-  --max-dim 2048 \
+  --max-dim 1024 \
   --padding-frac 0.02
 ```
 

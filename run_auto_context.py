@@ -2039,6 +2039,7 @@ def build_stage7_command(
         "--min-component-size", str(args.stage7_min_component_size),
         "--connectivity", str(args.stage7_connectivity),
         "--close-kernel", str(args.stage7_close_kernel),
+        "--max-hole-size", str(args.stage7_max_hole_size),
     ]
     if args.stage7_skip_remove_small:
         cmd.append("--skip-remove-small")
@@ -3588,6 +3589,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage7-min-component-size", type=int, default=3)
     parser.add_argument("--stage7-connectivity", type=int, choices=[4, 8], default=4)
     parser.add_argument("--stage7-close-kernel", type=int, default=3)
+    parser.add_argument("--stage7-max-hole-size", type=int, default=1)
     parser.add_argument("--stage7-skip-remove-small", action="store_true")
     parser.add_argument("--stage7-skip-close", action="store_true")
     parser.add_argument("--stage7-skip-fill-holes", action="store_true")

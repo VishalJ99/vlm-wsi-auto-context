@@ -23,6 +23,9 @@ from scipy import ndimage as ndi
 from utils.vlm_utils import normalize_class_label
 
 
+DEFAULT_MAX_HOLE_SIZE_CELLS = 1
+
+
 # -----------------------------------------------------------------------------
 # Data models
 # -----------------------------------------------------------------------------
@@ -525,12 +528,12 @@ def process_run(
     min_component_size: int,
     connectivity: int,
     close_kernel: int,
+    max_hole_size: int,
     skip_remove_small: bool,
     skip_close: bool,
     skip_fill_holes: bool,
     protect_non_bg_tissue: bool,
 ) -> dict:
-    max_hole_size = 10
     class_map = run.class_map
     tissue_mask_before = class_map == run.tissue_id
 
@@ -831,6 +834,15 @@ def create_parser() -> argparse.ArgumentParser:
         help="Odd kernel size for binary closing footprint (full kxk; default: 3)",
     )
     parser.add_argument(
+        "--max-hole-size",
+        type=int,
+        default=DEFAULT_MAX_HOLE_SIZE_CELLS,
+        help=(
+            "Fill only enclosed background components up to this many patch-grid cells. "
+            "Use 0 to run unrestricted binary_fill_holes. Default: 1"
+        ),
+    )
+    parser.add_argument(
         "--skip-remove-small",
         action="store_true",
         help="Disable small connected-component removal",
@@ -897,6 +909,7 @@ def main() -> None:
             min_component_size=max(1, args.min_component_size),
             connectivity=args.connectivity,
             close_kernel=max(1, args.close_kernel),
+            max_hole_size=max(0, args.max_hole_size),
             skip_remove_small=args.skip_remove_small,
             skip_close=args.skip_close,
             skip_fill_holes=args.skip_fill_holes,
