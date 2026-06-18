@@ -572,6 +572,39 @@ def percentile(sorted_values: List[float], pct: float) -> float:
     return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
 
 
+def result_item_key(row: Dict[str, Any]) -> Optional[tuple[str, str, str]]:
+    case_id = row.get("case_id")
+    run_id = row.get("run_id")
+    bbox_id = row.get("bbox_id")
+    if case_id is None or run_id is None or bbox_id is None:
+        return None
+    return str(case_id), str(run_id), str(bbox_id)
+
+
+def load_result_jsonl(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    with path.open("r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
+def latest_result_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    latest_by_item: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    passthrough: List[Dict[str, Any]] = []
+    for row in rows:
+        key = result_item_key(row)
+        if key is None:
+            passthrough.append(row)
+        else:
+            latest_by_item[key] = row
+    return passthrough + list(latest_by_item.values())
+
+
 def write_results_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
     fieldnames = [
         "case_id",
@@ -645,6 +678,151 @@ def write_results_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
                     "metadata_path": row.get("metadata_path"),
                 }
             )
+
+
+def write_retry_artifacts(batch_dir: Path, retry_rows: List[Dict[str, Any]]) -> tuple[Path, Path]:
+    retry_jsonl_path = batch_dir / "openrouter_retry_tasks.jsonl"
+    retry_csv_path = batch_dir / "openrouter_retry_tasks.csv"
+
+    with open(retry_jsonl_path, "w") as f:
+        for row in retry_rows:
+            cost = row.get("cost_estimate_usd") or {}
+            payload = {
+                "case_id": row.get("case_id"),
+                "run_id": row.get("run_id"),
+                "bbox_id": row.get("bbox_id"),
+                "crop_path": row.get("crop_path"),
+                "mask_path": row.get("mask_path"),
+                "failure_reason": row.get("failure_reason"),
+                "error": row.get("error"),
+                "rate_limited": row.get("rate_limited"),
+                "finish_reason": row.get("finish_reason"),
+                "estimated_total_cost_usd": cost.get("estimated_total_cost_usd"),
+                "metadata_path": row.get("metadata_path"),
+            }
+            f.write(json.dumps(payload) + "\n")
+
+    with open(retry_csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "case_id",
+                "run_id",
+                "bbox_id",
+                "crop_path",
+                "mask_path",
+                "failure_reason",
+                "error",
+                "rate_limited",
+                "finish_reason",
+                "estimated_total_cost_usd",
+                "metadata_path",
+            ],
+        )
+        writer.writeheader()
+        for row in retry_rows:
+            cost = row.get("cost_estimate_usd") or {}
+            writer.writerow(
+                {
+                    "case_id": row.get("case_id"),
+                    "run_id": row.get("run_id"),
+                    "bbox_id": row.get("bbox_id"),
+                    "crop_path": row.get("crop_path"),
+                    "mask_path": row.get("mask_path"),
+                    "failure_reason": row.get("failure_reason"),
+                    "error": row.get("error"),
+                    "rate_limited": row.get("rate_limited"),
+                    "finish_reason": row.get("finish_reason"),
+                    "estimated_total_cost_usd": cost.get("estimated_total_cost_usd"),
+                    "metadata_path": row.get("metadata_path"),
+                }
+            )
+    return retry_jsonl_path, retry_csv_path
+
+
+def build_batch_summary(
+    *,
+    batch_dir: Path,
+    results_path: Path,
+    results_csv_path: Path,
+    args: argparse.Namespace,
+    scheduled_count: int,
+    completed_rows: List[Dict[str, Any]],
+    skipped_existing: int,
+    latest_rows: List[Dict[str, Any]],
+    elapsed_total: float,
+) -> Dict[str, Any]:
+    latencies = sorted([float(r.get("elapsed_seconds", 0.0)) for r in completed_rows])
+    cumulative_latencies = sorted([float(r.get("elapsed_seconds", 0.0)) for r in latest_rows])
+    estimated_total_cost_usd = 0.0
+    estimated_cost_count = 0
+    qc_overall_pass_count = 0
+    qc_precision_pass_count = 0
+    qc_recall_pass_count = 0
+    qc_unavailable_count = 0
+    for row in latest_rows:
+        qc = row.get("qc") or {}
+        if qc.get("overall_pass") is True:
+            qc_overall_pass_count += 1
+        if qc.get("precision_pass") is True:
+            qc_precision_pass_count += 1
+        if qc.get("recall_pass") is True:
+            qc_recall_pass_count += 1
+        if qc.get("overall_pass") is None:
+            qc_unavailable_count += 1
+
+        cost = row.get("cost_estimate_usd") or {}
+        total_cost = cost.get("estimated_total_cost_usd")
+        if total_cost is None:
+            continue
+        try:
+            estimated_total_cost_usd += float(total_cost)
+            estimated_cost_count += 1
+        except Exception:
+            continue
+
+    return {
+        "finished_at": datetime.now().isoformat(),
+        "summary_scope": "cumulative_latest_results_with_current_run_timing",
+        "batch_dir": str(batch_dir),
+        "results_jsonl": str(results_path),
+        "results_csv": str(results_csv_path),
+        "total_scheduled": len(latest_rows),
+        "total_completed": len(latest_rows),
+        "success_count": sum(1 for r in latest_rows if r.get("status") == "success"),
+        "failed_count": sum(1 for r in latest_rows if r.get("status") != "success"),
+        "run_total_scheduled": scheduled_count,
+        "run_total_completed": len(completed_rows),
+        "run_success_count": sum(1 for r in completed_rows if r.get("status") == "success"),
+        "run_failed_count": sum(1 for r in completed_rows if r.get("status") != "success"),
+        "tasks_skipped_existing": skipped_existing,
+        "openrouter_retry_count": sum(1 for r in latest_rows if r.get("status") != "success"),
+        "rate_limited_count": sum(1 for r in latest_rows if r.get("rate_limited")),
+        "parsed_json_count": sum(1 for r in latest_rows if r.get("json_parsed")),
+        "run_rate_limited_count": sum(1 for r in completed_rows if r.get("rate_limited")),
+        "run_parsed_json_count": sum(1 for r in completed_rows if r.get("json_parsed")),
+        "qc_thresholds": {
+            "precision_threshold": float(args.qc_precision_threshold),
+            "recall_threshold": float(args.qc_recall_threshold),
+            "comparison": "gt",
+        },
+        "qc_precision_pass_count": qc_precision_pass_count,
+        "qc_recall_pass_count": qc_recall_pass_count,
+        "qc_overall_pass_count": qc_overall_pass_count,
+        "qc_unavailable_count": qc_unavailable_count,
+        "elapsed_seconds_total": elapsed_total,
+        "throughput_req_per_sec": len(completed_rows) / max(elapsed_total, 1e-6),
+        "latency_seconds_p50": percentile(latencies, 0.50),
+        "latency_seconds_p90": percentile(latencies, 0.90),
+        "latency_seconds_p95": percentile(latencies, 0.95),
+        "latency_seconds_max": latencies[-1] if latencies else 0.0,
+        "cumulative_latency_seconds_p50": percentile(cumulative_latencies, 0.50),
+        "cumulative_latency_seconds_p90": percentile(cumulative_latencies, 0.90),
+        "cumulative_latency_seconds_p95": percentile(cumulative_latencies, 0.95),
+        "cumulative_latency_seconds_max": cumulative_latencies[-1] if cumulative_latencies else 0.0,
+        "estimated_total_cost_usd": estimated_total_cost_usd,
+        "estimated_cost_count": estimated_cost_count,
+    }
 
 
 def write_manifest(
@@ -865,9 +1043,9 @@ def main() -> int:
     print(f"QC recall pass:       > {args.qc_recall_threshold}")
     print()
 
-    if not scheduled:
-        print("No tasks scheduled. Nothing to do.")
-        return 0
+    results_path = batch_dir / "results.jsonl"
+    results_csv_path = batch_dir / "results.csv"
+    summary_path = batch_dir / "summary.json"
 
     if args.dry_run:
         print("Dry-run sample (first 20 tasks):")
@@ -880,10 +1058,33 @@ def main() -> int:
             print(f"... {len(scheduled) - 20} more")
         return 0
 
-    results_path = batch_dir / "results.jsonl"
-    results_csv_path = batch_dir / "results.csv"
-    summary_path = batch_dir / "summary.json"
+    if not scheduled:
+        latest_rows = latest_result_rows(load_result_jsonl(results_path))
+        write_results_csv(results_csv_path, latest_rows)
+        retry_rows = [r for r in latest_rows if r.get("status") != "success"]
+        retry_jsonl_path, retry_csv_path = write_retry_artifacts(batch_dir, retry_rows)
+        summary = build_batch_summary(
+            batch_dir=batch_dir,
+            results_path=results_path,
+            results_csv_path=results_csv_path,
+            args=args,
+            scheduled_count=0,
+            completed_rows=[],
+            skipped_existing=skipped_existing,
+            latest_rows=latest_rows,
+            elapsed_total=0.0,
+        )
+        summary_path.write_text(json.dumps(summary, indent=2))
+        print("No tasks scheduled. Refreshed cumulative sidecars from existing results.")
+        print(f"Success:              {summary['success_count']}")
+        print(f"Failed:               {summary['failed_count']}")
+        print(f"Results CSV:          {results_csv_path}")
+        print(f"Retry JSONL:          {retry_jsonl_path}")
+        print(f"Retry CSV:            {retry_csv_path}")
+        print(f"Summary JSON:         {summary_path}")
+        return 0
 
+    existing_result_rows = load_result_jsonl(results_path)
     completed_rows: List[Dict[str, Any]] = []
     start = time.time()
 
@@ -943,132 +1144,33 @@ def main() -> int:
                         f"throughput={throughput:.2f} req/s"
                     )
 
-    write_results_csv(results_csv_path, completed_rows)
+    latest_rows = latest_result_rows(existing_result_rows + completed_rows)
+    write_results_csv(results_csv_path, latest_rows)
 
-    retry_rows = [r for r in completed_rows if r.get("status") != "success"]
-    retry_jsonl_path = batch_dir / "openrouter_retry_tasks.jsonl"
-    retry_csv_path = batch_dir / "openrouter_retry_tasks.csv"
-
-    with open(retry_jsonl_path, "w") as f:
-        for row in retry_rows:
-            cost = row.get("cost_estimate_usd") or {}
-            payload = {
-                "case_id": row.get("case_id"),
-                "run_id": row.get("run_id"),
-                "bbox_id": row.get("bbox_id"),
-                "crop_path": row.get("crop_path"),
-                "mask_path": row.get("mask_path"),
-                "failure_reason": row.get("failure_reason"),
-                "error": row.get("error"),
-                "rate_limited": row.get("rate_limited"),
-                "finish_reason": row.get("finish_reason"),
-                "estimated_total_cost_usd": cost.get("estimated_total_cost_usd"),
-                "metadata_path": row.get("metadata_path"),
-            }
-            f.write(json.dumps(payload) + "\n")
-
-    with open(retry_csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "case_id",
-                "run_id",
-                "bbox_id",
-                "crop_path",
-                "mask_path",
-                "failure_reason",
-                "error",
-                "rate_limited",
-                "finish_reason",
-                "estimated_total_cost_usd",
-                "metadata_path",
-            ],
-        )
-        writer.writeheader()
-        for row in retry_rows:
-            cost = row.get("cost_estimate_usd") or {}
-            writer.writerow(
-                {
-                    "case_id": row.get("case_id"),
-                    "run_id": row.get("run_id"),
-                    "bbox_id": row.get("bbox_id"),
-                    "crop_path": row.get("crop_path"),
-                    "mask_path": row.get("mask_path"),
-                    "failure_reason": row.get("failure_reason"),
-                    "error": row.get("error"),
-                    "rate_limited": row.get("rate_limited"),
-                    "finish_reason": row.get("finish_reason"),
-                    "estimated_total_cost_usd": cost.get("estimated_total_cost_usd"),
-                    "metadata_path": row.get("metadata_path"),
-                }
-            )
+    retry_rows = [r for r in latest_rows if r.get("status") != "success"]
+    retry_jsonl_path, retry_csv_path = write_retry_artifacts(batch_dir, retry_rows)
 
     elapsed_total = max(time.time() - start, 1e-6)
-    latencies = sorted([float(r.get("elapsed_seconds", 0.0)) for r in completed_rows])
-    estimated_total_cost_usd = 0.0
-    estimated_cost_count = 0
-    qc_overall_pass_count = 0
-    qc_precision_pass_count = 0
-    qc_recall_pass_count = 0
-    qc_unavailable_count = 0
-    for row in completed_rows:
-        qc = row.get("qc") or {}
-        if qc.get("overall_pass") is True:
-            qc_overall_pass_count += 1
-        if qc.get("precision_pass") is True:
-            qc_precision_pass_count += 1
-        if qc.get("recall_pass") is True:
-            qc_recall_pass_count += 1
-        if qc.get("overall_pass") is None:
-            qc_unavailable_count += 1
-
-        cost = row.get("cost_estimate_usd") or {}
-        total_cost = cost.get("estimated_total_cost_usd")
-        if total_cost is None:
-            continue
-        try:
-            estimated_total_cost_usd += float(total_cost)
-            estimated_cost_count += 1
-        except Exception:
-            continue
-
-    summary = {
-        "finished_at": datetime.now().isoformat(),
-        "batch_dir": str(batch_dir),
-        "results_jsonl": str(results_path),
-        "results_csv": str(results_csv_path),
-        "total_scheduled": len(scheduled),
-        "total_completed": len(completed_rows),
-        "success_count": sum(1 for r in completed_rows if r.get("status") == "success"),
-        "failed_count": sum(1 for r in completed_rows if r.get("status") != "success"),
-        "openrouter_retry_count": len(retry_rows),
-        "rate_limited_count": sum(1 for r in completed_rows if r.get("rate_limited")),
-        "parsed_json_count": sum(1 for r in completed_rows if r.get("json_parsed")),
-        "qc_thresholds": {
-            "precision_threshold": float(args.qc_precision_threshold),
-            "recall_threshold": float(args.qc_recall_threshold),
-            "comparison": "gt",
-        },
-        "qc_precision_pass_count": qc_precision_pass_count,
-        "qc_recall_pass_count": qc_recall_pass_count,
-        "qc_overall_pass_count": qc_overall_pass_count,
-        "qc_unavailable_count": qc_unavailable_count,
-        "elapsed_seconds_total": elapsed_total,
-        "throughput_req_per_sec": len(completed_rows) / elapsed_total,
-        "latency_seconds_p50": percentile(latencies, 0.50),
-        "latency_seconds_p90": percentile(latencies, 0.90),
-        "latency_seconds_p95": percentile(latencies, 0.95),
-        "latency_seconds_max": latencies[-1] if latencies else 0.0,
-        "estimated_total_cost_usd": estimated_total_cost_usd,
-        "estimated_cost_count": estimated_cost_count,
-    }
+    summary = build_batch_summary(
+        batch_dir=batch_dir,
+        results_path=results_path,
+        results_csv_path=results_csv_path,
+        args=args,
+        scheduled_count=len(scheduled),
+        completed_rows=completed_rows,
+        skipped_existing=skipped_existing,
+        latest_rows=latest_rows,
+        elapsed_total=elapsed_total,
+    )
     summary_path.write_text(json.dumps(summary, indent=2))
 
     print()
     print("=" * 72)
     print("BATCH SUMMARY")
     print("=" * 72)
-    print(f"Completed:            {summary['total_completed']}/{summary['total_scheduled']}")
+    print(f"Completed:            {summary['total_completed']}/{summary['total_scheduled']} cumulative")
+    print(f"Run completed:        {summary['run_total_completed']}/{summary['run_total_scheduled']}")
+    print(f"Skipped existing:     {summary['tasks_skipped_existing']}")
     print(f"Success:              {summary['success_count']}")
     print(f"Failed:               {summary['failed_count']}")
     print(f"OpenRouter retries:   {summary['openrouter_retry_count']}")
