@@ -64,6 +64,8 @@ google-genai>=1.0
 # --- WSI I/O ---
 # cuCIM provides GPU-accelerated WSI reading.
 # setup.sh installs it via pip.
+# imagecodecs lets tifffile read compressed TIFFs, including LZW XRM screenshots/slices.
+imagecodecs>=2025.0
 
 # --- Transitive deps pinned for reproducibility ---
 scipy>=1.10
